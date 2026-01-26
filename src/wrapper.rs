@@ -185,6 +185,12 @@ pub async fn run(claude_args: Vec<String>) -> Result<()> {
                 info!("Restart requested: {}", reason);
                 add_continue = true;
                 pending_prompt = prompt;
+
+                // Clear terminal and reset before restart
+                // This helps ensure Claude's TUI renders properly
+                print!("\x1b[2J\x1b[H\x1b[0m");
+                let _ = std::io::stdout().flush();
+
                 // Small delay before restart
                 std::thread::sleep(Duration::from_millis(100));
                 continue;
@@ -414,10 +420,15 @@ fn forward_io(
         }
 
         // Inject prompt after Claude has had time to initialize
-        // We wait 1.5 seconds after startup to ensure Claude is ready
-        if !prompt_injected && prompt_to_inject.is_some() && startup_time.elapsed() > Duration::from_millis(1500) {
+        // We wait 3 seconds after startup to ensure Claude's TUI is ready
+        if !prompt_injected && prompt_to_inject.is_some() && startup_time.elapsed() > Duration::from_secs(3) {
             if let Some(prompt) = prompt_to_inject.take() {
                 info!("Injecting prompt after restart: {}", prompt);
+
+                // Send SIGWINCH to trigger TUI redraw before injecting
+                let _ = signal::kill(child, Signal::SIGWINCH);
+                std::thread::sleep(Duration::from_millis(100));
+
                 let msg = format!("{}\n", prompt);
                 unsafe { libc::write(master_fd, msg.as_ptr() as *const _, msg.len()) };
                 prompt_injected = true;
