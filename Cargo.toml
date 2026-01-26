@@ -1,20 +1,17 @@
 [package]
 name = "rusty-restart-claude"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "MCP proxy for hot-reloading MCP servers during development"
+description = "MCP server that can restart Claude Code to reload MCP servers during development"
 license = "MIT"
 
 [dependencies]
-# Async runtime
-tokio = { version = "1", features = ["full", "process"] }
+# Async runtime (minimal features for MCP server)
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 # JSON-RPC / MCP message handling
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-
-# CLI argument parsing
-clap = { version = "4", features = ["derive"] }
 
 # Logging
 tracing = "0.1"
@@ -22,14 +19,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Error handling
 anyhow = "1"
-thiserror = "1"
 
-# For uptime tracking
-tokio-util = "0.7"
-
-# Unix signal handling
+# Unix process control
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.29", features = ["signal"] }
+libc = "0.2"
 
 [profile.release]
 lto = true

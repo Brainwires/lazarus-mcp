@@ -1,17 +1,23 @@
 # rusty-restart-claude
 
-A Rust MCP proxy for hot-reloading MCP servers during development with Claude Code.
+A standalone Rust MCP server that can restart Claude Code to reload all MCP servers during development.
 
 ## Problem
 
-When using Claude Code to develop an MCP server that Claude is connected to, you need a way to restart the server to pick up code changes without losing your Claude Code session.
+When using Claude Code to develop an MCP server, you need a way to restart Claude Code so it reconnects to the updated server. There's no built-in way to programmatically trigger this.
 
 ## Solution
 
-This tool wraps your MCP server as a transparent proxy, injecting two additional tools:
+This MCP server provides two tools:
 
-- **`restart_server`** - Claude can call this to restart the wrapped server and pick up code changes
-- **`server_status`** - Check if the server is running, uptime, restart count
+- **`restart_claude`** - Restarts Claude Code entirely, which reconnects to all MCP servers with fresh code
+- **`server_status`** - Shows status info about Claude Code and this server
+
+When `restart_claude` is called, it:
+1. Forks a detached daemon process (survives Claude Code's death)
+2. The daemon waits briefly, then kills Claude Code
+3. The daemon restarts Claude Code in the same working directory
+4. The daemon exits
 
 ## Installation
 
@@ -26,76 +32,100 @@ cargo build --release
 # Binary at target/release/rusty-restart-claude
 ```
 
-## Usage
+## Configuration
 
-### Configure in Claude Code
-
-Add to your `~/.claude.json` or project's `.claude/settings.local.json`:
+Add to your `~/.claude.json`:
 
 ```json
 {
   "mcpServers": {
-    "my-server": {
-      "command": "rusty-restart-claude",
-      "args": ["wrap", "--name", "my-server", "--", "node", "./dist/index.js"]
+    "rusty-restart-claude": {
+      "type": "stdio",
+      "command": "/path/to/rusty-restart-claude",
+      "args": [],
+      "env": {
+        "RUST_LOG": "info"
+      }
     }
   }
 }
 ```
 
-### CLI
+## Usage
 
-```bash
-# Wrap an MCP server
-rusty-restart-claude wrap --name <server-name> -- <command> [args...]
-
-# Example: wrap a Node.js MCP server
-rusty-restart-claude wrap --name my-mcp -- node ./dist/index.js
-
-# Example: wrap a Python MCP server
-rusty-restart-claude wrap --name my-mcp -- python -m my_mcp_server
-```
-
-### In Claude Code
-
-After configuring, Claude will see the injected tools:
+After configuring, Claude will have access to two tools:
 
 ```
-> What tools do you have from my-server?
+> What tools do you have from rusty-restart-claude?
 
 I have access to:
-- restart_server: Restart the wrapped MCP server to pick up code changes
-- server_status: Check server status (running, uptime, restart count)
-- [... your server's tools ...]
+- restart_claude: Restart Claude Code to reconnect all MCP servers
+- server_status: Get status information about this MCP server and Claude Code
 ```
 
-When you make changes to your MCP server's code:
+When you make changes to an MCP server's code:
 
 ```
-> I've updated the tool implementation. Please restart the server.
+> I've updated the brainwires MCP server code. Please restart Claude Code to pick up the changes.
 
-[Calls restart_server tool]
+[Calls restart_claude tool]
 
-Server 'my-server' restarted successfully.
-PID: 12345
-Restart count: 1
+Restart initiated!
+
+Claude Code (PID 12345) will restart in 500ms.
+Working directory: /home/user/dev/my-project
+
+This session will end. A new Claude Code session will start automatically.
 ```
+
+## Tools
+
+### restart_claude
+
+Restarts Claude Code to reconnect all MCP servers.
+
+**Parameters:**
+- `delay_ms` (optional, integer): Delay before restarting in milliseconds. Default: 500
+
+### server_status
+
+Returns status information:
+- `server_pid`: This MCP server's process ID
+- `claude_code_pid`: Claude Code's process ID
+- `claude_code_exe`: Path to Claude Code executable
+- `working_directory`: Claude Code's current working directory
 
 ## How It Works
 
 ```
-Claude Code <--stdio--> rusty-restart-claude <--stdio--> Your MCP Server
-                              |
-                              +-- Injects restart_server and server_status tools
-                              +-- Maintains connection during restart
-                              +-- Replays initialize request after restart
+┌─────────────────────────────────────────────────────────────┐
+│                      Claude Code                             │
+│  ┌──────────────────┐  ┌──────────────────┐                 │
+│  │ brainwires MCP   │  │ rusty-restart    │  ... other MCPs │
+│  │ (your server)    │  │ (this server)    │                 │
+│  └──────────────────┘  └────────┬─────────┘                 │
+└─────────────────────────────────┼───────────────────────────┘
+                                  │
+                     calls restart_claude
+                                  │
+                                  ▼
+                    ┌─────────────────────────┐
+                    │   Fork detached daemon   │
+                    │   (survives parent)      │
+                    └─────────────┬───────────┘
+                                  │
+                                  ▼
+                    ┌─────────────────────────┐
+                    │   1. Wait delay_ms      │
+                    │   2. Kill Claude Code   │
+                    │   3. Restart Claude     │
+                    │   4. Daemon exits       │
+                    └─────────────────────────┘
 ```
 
-1. Acts as a transparent MCP proxy between Claude Code and your server
-2. Intercepts `tools/list` responses to inject additional tools
-3. Handles `restart_server` calls by killing and respawning the wrapped process
-4. Caches the `initialize` request and replays it after restart
-5. All other messages pass through unchanged
+## Platform Support
+
+Currently Linux only (uses `/proc` filesystem for process information).
 
 ## License
 
