@@ -96,21 +96,20 @@ fn handle_tools_list() -> Value {
         "tools": [
             {
                 "name": "restart_claude",
-                "description": "Restart Claude Code to reconnect all MCP servers. Use this after making changes to an MCP server's code. A detached process will restart Claude Code, preserving the working directory.",
+                "description": "Restart Claude Code to reconnect all MCP servers. Use this after making changes to an MCP server's code. Requires Claude to be started via the rusty-restart-claude wrapper. The session will automatically continue with --continue.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "delay_ms": {
-                            "type": "integer",
-                            "description": "Delay in milliseconds before restarting (default: 500)",
-                            "default": 500
+                        "reason": {
+                            "type": "string",
+                            "description": "Optional reason for the restart (for logging)"
                         }
                     }
                 }
             },
             {
                 "name": "server_status",
-                "description": "Get status information about this MCP server and Claude Code process.",
+                "description": "Get status information about the wrapper, Claude Code process, and whether restart is supported.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {}
@@ -151,22 +150,22 @@ async fn handle_tools_call(params: Option<&Value>) -> Value {
 }
 
 async fn handle_restart_claude(arguments: Option<&Value>) -> Value {
-    let delay_ms = arguments
-        .and_then(|a| a.get("delay_ms"))
-        .and_then(|d| d.as_u64())
-        .unwrap_or(500) as u32;
+    let reason = arguments
+        .and_then(|a| a.get("reason"))
+        .and_then(|r| r.as_str())
+        .unwrap_or("MCP server restart requested")
+        .to_string();
 
-    info!(delay_ms = delay_ms, "Triggering Claude Code restart");
+    info!(reason = %reason, "Triggering Claude Code restart via signal file");
 
-    match restart::trigger_restart(delay_ms) {
+    match restart::send_restart_signal(&reason) {
         Ok(info) => json!({
             "content": [{
                 "type": "text",
                 "text": format!(
-                    "Restart initiated!\n\nClaude Code (PID {}) will restart in {}ms.\nWorking directory: {}\n\nThis session will end. A new Claude Code session will start automatically.",
-                    info.claude_pid,
-                    delay_ms,
-                    info.working_dir
+                    "Restart signal sent!\n\nWrapper PID: {}\nReason: {}\n\nClaude will restart momentarily and resume with --continue.",
+                    info.wrapper_pid,
+                    reason
                 )
             }],
             "isError": false
@@ -174,7 +173,7 @@ async fn handle_restart_claude(arguments: Option<&Value>) -> Value {
         Err(e) => json!({
             "content": [{
                 "type": "text",
-                "text": format!("Failed to trigger restart: {}", e)
+                "text": format!("Failed to trigger restart: {}\n\nMake sure you started Claude via the rusty-restart-claude wrapper:\n  rusty-restart-claude [claude-args...]", e)
             }],
             "isError": true
         }),

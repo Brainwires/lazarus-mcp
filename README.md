@@ -1,23 +1,27 @@
 # rusty-restart-claude
 
-A standalone Rust MCP server that can restart Claude Code to reload all MCP servers during development.
+A dual-mode Rust tool that enables restarting Claude Code to reload MCP servers during development.
 
-## Problem
+## The Problem
 
-When using Claude Code to develop an MCP server, you need a way to restart Claude Code so it reconnects to the updated server. There's no built-in way to programmatically trigger this.
+When using Claude Code to develop an MCP server, you need a way to restart Claude Code so it reconnects to the updated server. The challenge is preserving the terminal and session.
 
-## Solution
+## The Solution
 
-This MCP server provides two tools:
+This tool operates in two modes:
 
-- **`restart_claude`** - Restarts Claude Code entirely, which reconnects to all MCP servers with fresh code
-- **`server_status`** - Shows status info about Claude Code and this server
+1. **Wrapper mode (default)**: Wraps Claude Code, maintaining terminal ownership so it can restart Claude without losing the terminal
+2. **MCP server mode (`--mcp-server`)**: Runs as an MCP server that signals the wrapper to restart
 
-When `restart_claude` is called, it:
-1. Forks a detached daemon process (survives Claude Code's death)
-2. The daemon waits briefly, then kills Claude Code
-3. The daemon restarts Claude Code in the same working directory
-4. The daemon exits
+### Architecture
+
+```
+Terminal
+  └── rusty-restart-claude (wrapper)     <-- owns terminal, stays alive
+        └── claude --continue [args...]  <-- child process, can be restarted
+              └── MCP servers
+                    └── rusty-restart-claude --mcp-server  <-- signals wrapper
+```
 
 ## Installation
 
@@ -25,14 +29,9 @@ When `restart_claude` is called, it:
 cargo install --path .
 ```
 
-Or build from source:
+## Usage
 
-```bash
-cargo build --release
-# Binary at target/release/rusty-restart-claude
-```
-
-## Configuration
+### Step 1: Configure MCP Server
 
 Add to your `~/.claude.json`:
 
@@ -41,8 +40,8 @@ Add to your `~/.claude.json`:
   "mcpServers": {
     "rusty-restart-claude": {
       "type": "stdio",
-      "command": "/path/to/rusty-restart-claude",
-      "args": [],
+      "command": "rusty-restart-claude",
+      "args": ["--mcp-server"],
       "env": {
         "RUST_LOG": "info"
       }
@@ -51,81 +50,73 @@ Add to your `~/.claude.json`:
 }
 ```
 
-## Usage
+### Step 2: Start Claude via the Wrapper
 
-After configuring, Claude will have access to two tools:
+Instead of running `claude` directly, use:
+
+```bash
+# Start Claude through the wrapper
+rusty-restart-claude
+
+# Pass any arguments to Claude
+rusty-restart-claude --continue
+rusty-restart-claude -p "Help me with..."
+```
+
+### Step 3: Use the Restart Tool
+
+Once Claude is running through the wrapper, you can use the `restart_claude` tool:
 
 ```
-> What tools do you have from rusty-restart-claude?
-
-I have access to:
-- restart_claude: Restart Claude Code to reconnect all MCP servers
-- server_status: Get status information about this MCP server and Claude Code
-```
-
-When you make changes to an MCP server's code:
-
-```
-> I've updated the brainwires MCP server code. Please restart Claude Code to pick up the changes.
+> Please restart Claude to pick up my MCP server changes
 
 [Calls restart_claude tool]
 
-Restart initiated!
-
-Claude Code (PID 12345) will restart in 500ms.
-Working directory: /home/user/dev/my-project
-
-This session will end. A new Claude Code session will start automatically.
+Restart signal sent! Claude will restart momentarily and resume with --continue.
 ```
+
+## How It Works
+
+1. User starts Claude via `rusty-restart-claude [args...]`
+2. Wrapper spawns Claude as a child process with PTY passthrough
+3. Claude connects to MCP servers, including `rusty-restart-claude --mcp-server`
+4. When `restart_claude` tool is called:
+   - MCP server writes a signal file to `/tmp/rusty-restart-claude-{wrapper-pid}`
+   - Wrapper detects the signal file
+   - Wrapper sends SIGINT to Claude, waits for graceful exit
+   - Wrapper restarts Claude with `--continue` to resume the session
+   - Terminal is preserved because the wrapper never exits
 
 ## Tools
 
 ### restart_claude
 
-Restarts Claude Code to reconnect all MCP servers.
+Signals the wrapper to restart Claude Code.
 
 **Parameters:**
-- `delay_ms` (optional, integer): Delay before restarting in milliseconds. Default: 500
+- `reason` (optional, string): Reason for the restart (for logging)
 
 ### server_status
 
-Returns status information:
-- `server_pid`: This MCP server's process ID
+Shows status information about the wrapper and Claude Code process.
+
+**Response includes:**
+- `mcp_server_pid`: This MCP server's process ID
+- `wrapper_pid`: The wrapper's process ID (if running through wrapper)
+- `wrapper_running`: Whether the wrapper is active
 - `claude_code_pid`: Claude Code's process ID
-- `claude_code_exe`: Path to Claude Code executable
-- `working_directory`: Claude Code's current working directory
+- `working_directory`: Current working directory
 
-## How It Works
+## Key Benefits
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      Claude Code                             │
-│  ┌──────────────────┐  ┌──────────────────┐                 │
-│  │ brainwires MCP   │  │ rusty-restart    │  ... other MCPs │
-│  │ (your server)    │  │ (this server)    │                 │
-│  └──────────────────┘  └────────┬─────────┘                 │
-└─────────────────────────────────┼───────────────────────────┘
-                                  │
-                     calls restart_claude
-                                  │
-                                  ▼
-                    ┌─────────────────────────┐
-                    │   Fork detached daemon   │
-                    │   (survives parent)      │
-                    └─────────────┬───────────┘
-                                  │
-                                  ▼
-                    ┌─────────────────────────┐
-                    │   1. Wait delay_ms      │
-                    │   2. Kill Claude Code   │
-                    │   3. Restart Claude     │
-                    │   4. Daemon exits       │
-                    └─────────────────────────┘
-```
+- **Terminal preserved** - Wrapper owns terminal, Claude is just a child
+- **Session continuation** - Restart always uses `--continue`
+- **Simple signaling** - File-based IPC, no complex sockets
+- **Graceful shutdown** - SIGINT first, then SIGTERM, then SIGKILL
 
 ## Platform Support
 
-Currently Linux only (uses `/proc` filesystem for process information).
+Currently Linux only (uses `/proc` filesystem and PTY).
 
 ## License
 

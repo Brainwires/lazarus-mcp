@@ -6,8 +6,8 @@ description = "MCP server that can restart Claude Code to reload MCP servers dur
 license = "MIT"
 
 [dependencies]
-# Async runtime (minimal features for MCP server)
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# Async runtime (with features for wrapper mode)
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "process", "time", "fs", "signal"] }
 
 # JSON-RPC / MCP message handling
 serde = { version = "1", features = ["derive"] }
@@ -20,9 +20,15 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Error handling
 anyhow = "1"
 
+# Utilities
+which = "7"
+dirs = "6"
+ctrlc = "3"
+
 # Unix process control
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+nix = { version = "0.29", features = ["term", "process", "signal", "fs", "poll"] }
 
 [profile.release]
 lto = true
