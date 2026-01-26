@@ -26,6 +26,9 @@ Terminal
 ## Installation
 
 ```bash
+# From source
+git clone https://github.com/Brainwires/rusty-restart-claude.git
+cd rusty-restart-claude
 cargo install --path .
 ```
 
@@ -63,6 +66,11 @@ rusty-restart-claude --continue
 rusty-restart-claude -p "Help me with..."
 ```
 
+**Tip:** Create a shell alias for convenience:
+```bash
+alias claude='rusty-restart-claude'
+```
+
 ### Step 3: Use the Restart Tool
 
 Once Claude is running through the wrapper, you can use the `restart_claude` tool:
@@ -78,11 +86,12 @@ Restart signal sent! Claude will restart momentarily and resume with --continue.
 ## How It Works
 
 1. User starts Claude via `rusty-restart-claude [args...]`
-2. Wrapper spawns Claude as a child process with PTY passthrough
-3. Claude connects to MCP servers, including `rusty-restart-claude --mcp-server`
-4. When `restart_claude` tool is called:
+2. Wrapper spawns Claude as a child process with full PTY passthrough
+3. Terminal size is inherited and resize events (SIGWINCH) are propagated
+4. Claude connects to MCP servers, including `rusty-restart-claude --mcp-server`
+5. When `restart_claude` tool is called:
    - MCP server writes a signal file to `/tmp/rusty-restart-claude-{wrapper-pid}`
-   - Wrapper detects the signal file
+   - Wrapper detects the signal file (polling every 100ms)
    - Wrapper sends SIGINT to Claude, waits for graceful exit
    - Wrapper restarts Claude with `--continue` to resume the session
    - Terminal is preserved because the wrapper never exits
@@ -107,12 +116,15 @@ Shows status information about the wrapper and Claude Code process.
 - `claude_code_pid`: Claude Code's process ID
 - `working_directory`: Current working directory
 
-## Key Benefits
+## Features
 
 - **Terminal preserved** - Wrapper owns terminal, Claude is just a child
-- **Session continuation** - Restart always uses `--continue`
-- **Simple signaling** - File-based IPC, no complex sockets
-- **Graceful shutdown** - SIGINT first, then SIGTERM, then SIGKILL
+- **Full PTY passthrough** - Complete terminal emulation with proper size handling
+- **Terminal resize support** - SIGWINCH propagation keeps Claude's display correct
+- **Session continuation** - Restart always uses `--continue` to resume conversation
+- **Simple signaling** - File-based IPC, no complex sockets or daemons
+- **Graceful shutdown** - SIGINT (3s) → SIGTERM (2s) → SIGKILL sequence
+- **Raw mode passthrough** - All keyboard input forwarded correctly
 
 ## Platform Support
 
