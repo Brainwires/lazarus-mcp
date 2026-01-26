@@ -96,13 +96,17 @@ fn handle_tools_list() -> Value {
         "tools": [
             {
                 "name": "restart_claude",
-                "description": "Restart Claude Code to reconnect all MCP servers. Use this after making changes to an MCP server's code. Requires Claude to be started via the rusty-restart-claude wrapper. The session will automatically continue with --continue.",
+                "description": "Restart Claude Code to reconnect all MCP servers. Use this after making changes to an MCP server's code. Requires Claude to be started via the rusty-restart-claude wrapper. The session will automatically continue with --continue. Optionally include a prompt to auto-send after restart.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "reason": {
                             "type": "string",
                             "description": "Optional reason for the restart (for logging)"
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "Optional prompt to automatically send after restart (e.g., 'Continue where we left off - MCP servers reloaded')"
                         }
                     }
                 }
@@ -156,20 +160,32 @@ async fn handle_restart_claude(arguments: Option<&Value>) -> Value {
         .unwrap_or("MCP server restart requested")
         .to_string();
 
-    info!(reason = %reason, "Triggering Claude Code restart via signal file");
+    let prompt = arguments
+        .and_then(|a| a.get("prompt"))
+        .and_then(|p| p.as_str());
 
-    match restart::send_restart_signal(&reason) {
-        Ok(info) => json!({
-            "content": [{
-                "type": "text",
-                "text": format!(
-                    "Restart signal sent!\n\nWrapper PID: {}\nReason: {}\n\nClaude will restart momentarily and resume with --continue.",
-                    info.wrapper_pid,
-                    reason
-                )
-            }],
-            "isError": false
-        }),
+    info!(reason = %reason, prompt = ?prompt, "Triggering Claude Code restart via signal file");
+
+    match restart::send_restart_signal(&reason, prompt) {
+        Ok(info) => {
+            let prompt_msg = if prompt.is_some() {
+                "\nA prompt will be auto-sent after restart."
+            } else {
+                ""
+            };
+            json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!(
+                        "Restart signal sent!\n\nWrapper PID: {}\nReason: {}{}\\n\nClaude will restart momentarily and resume with --continue.",
+                        info.wrapper_pid,
+                        reason,
+                        prompt_msg
+                    )
+                }],
+                "isError": false
+            })
+        },
         Err(e) => json!({
             "content": [{
                 "type": "text",

@@ -18,6 +18,8 @@ pub struct RestartSignal {
     pub action: String,
     pub timestamp: u64,
     pub reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -101,7 +103,7 @@ fn find_wrapper_pid() -> Option<u32> {
 }
 
 /// Send a restart signal to the wrapper
-pub fn send_restart_signal(reason: &str) -> Result<RestartSignalInfo> {
+pub fn send_restart_signal(reason: &str, prompt: Option<&str>) -> Result<RestartSignalInfo> {
     let wrapper_pid = find_wrapper_pid()
         .context("Could not find wrapper process. Make sure Claude was started via: rusty-restart-claude [args...]")?;
 
@@ -114,6 +116,7 @@ pub fn send_restart_signal(reason: &str) -> Result<RestartSignalInfo> {
             .unwrap()
             .as_secs(),
         reason: reason.to_string(),
+        prompt: prompt.map(|s| s.to_string()),
     };
 
     let content = serde_json::to_string_pretty(&signal)?;

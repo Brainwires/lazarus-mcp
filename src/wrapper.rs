@@ -5,6 +5,7 @@ use nix::sys::signal::{self, Signal};
 use nix::sys::termios::{self, SetArg};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{dup2, execvp, fork, setsid, ForkResult, Pid};
+use serde_json;
 use std::ffi::CString;
 use std::fs;
 use std::io::Write;
@@ -108,14 +109,38 @@ fn find_claude() -> Result<PathBuf> {
     anyhow::bail!("Could not find claude executable. Make sure Claude Code is installed.")
 }
 
-/// Check if there's a restart signal
-fn check_restart_signal() -> Option<String> {
+/// Parsed restart signal
+#[derive(Debug)]
+struct ParsedRestartSignal {
+    reason: String,
+    prompt: Option<String>,
+}
+
+/// Check if there's a restart signal and parse it
+fn check_restart_signal() -> Option<ParsedRestartSignal> {
     let path = signal_file_path();
     if path.exists() {
         if let Ok(content) = fs::read_to_string(&path) {
             // Delete the signal file
             let _ = fs::remove_file(&path);
-            return Some(content);
+
+            // Try to parse as JSON to extract prompt
+            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&content) {
+                let reason = parsed.get("reason")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("restart requested")
+                    .to_string();
+                let prompt = parsed.get("prompt")
+                    .and_then(|p| p.as_str())
+                    .map(|s| s.to_string());
+                return Some(ParsedRestartSignal { reason, prompt });
+            }
+
+            // Fallback: treat content as reason
+            return Some(ParsedRestartSignal {
+                reason: content,
+                prompt: None,
+            });
         }
     }
     None
@@ -139,6 +164,7 @@ pub async fn run(claude_args: Vec<String>) -> Result<()> {
     }).context("Failed to set Ctrl+C handler")?;
 
     let mut add_continue = false;
+    let mut pending_prompt: Option<String> = None;
 
     while running.load(Ordering::SeqCst) {
         // Build args for this run
@@ -151,13 +177,14 @@ pub async fn run(claude_args: Vec<String>) -> Result<()> {
 
         info!("Starting claude with args: {:?}", args);
 
-        // Run claude with PTY
-        let exit_reason = run_claude_with_pty(&claude_path, &args, running.clone())?;
+        // Run claude with PTY, passing any pending prompt
+        let exit_reason = run_claude_with_pty(&claude_path, &args, running.clone(), pending_prompt.take())?;
 
         match exit_reason {
-            ExitReason::RestartRequested(reason) => {
+            ExitReason::RestartRequested { reason, prompt } => {
                 info!("Restart requested: {}", reason);
                 add_continue = true;
+                pending_prompt = prompt;
                 // Small delay before restart
                 std::thread::sleep(Duration::from_millis(100));
                 continue;
@@ -185,7 +212,7 @@ pub async fn run(claude_args: Vec<String>) -> Result<()> {
 
 #[derive(Debug)]
 enum ExitReason {
-    RestartRequested(String),
+    RestartRequested { reason: String, prompt: Option<String> },
     NormalExit(i32),
     Signal(Signal),
     WrapperShutdown,
@@ -195,6 +222,7 @@ fn run_claude_with_pty(
     claude_path: &PathBuf,
     args: &[String],
     running: Arc<AtomicBool>,
+    inject_prompt: Option<String>,
 ) -> Result<ExitReason> {
     // Get terminal size from real terminal
     let winsize = get_terminal_size();
@@ -263,7 +291,7 @@ fn run_claude_with_pty(
             // Close slave side
             drop(slave);
 
-            let result = forward_io(master, child, running);
+            let result = forward_io(master, child, running, inject_prompt);
 
             // Clear the global master fd
             MASTER_PTY_FD.store(-1, Ordering::SeqCst);
@@ -282,6 +310,7 @@ fn forward_io(
     master: OwnedFd,
     child: Pid,
     running: Arc<AtomicBool>,
+    inject_prompt: Option<String>,
 ) -> Result<ExitReason> {
     let master_fd = master.as_raw_fd();
 
@@ -299,6 +328,11 @@ fn forward_io(
 
     let mut buf = [0u8; 4096];
     let mut last_signal_check = Instant::now();
+
+    // Track if we need to inject a prompt after startup
+    let mut prompt_to_inject = inject_prompt;
+    let mut startup_time = Instant::now();
+    let mut prompt_injected = false;
 
     loop {
         // Check if wrapper should stop
@@ -337,7 +371,10 @@ fn forward_io(
                     }
                 }
 
-                return Ok(ExitReason::RestartRequested(signal_content));
+                return Ok(ExitReason::RestartRequested {
+                    reason: signal_content.reason,
+                    prompt: signal_content.prompt,
+                });
             }
         }
 
@@ -374,6 +411,17 @@ fn forward_io(
 
         if ready <= 0 {
             continue;
+        }
+
+        // Inject prompt after Claude has had time to initialize
+        // We wait 1.5 seconds after startup to ensure Claude is ready
+        if !prompt_injected && prompt_to_inject.is_some() && startup_time.elapsed() > Duration::from_millis(1500) {
+            if let Some(prompt) = prompt_to_inject.take() {
+                info!("Injecting prompt after restart: {}", prompt);
+                let msg = format!("{}\n", prompt);
+                unsafe { libc::write(master_fd, msg.as_ptr() as *const _, msg.len()) };
+                prompt_injected = true;
+            }
         }
 
         // Read from PTY master (claude's output) and write to stdout
