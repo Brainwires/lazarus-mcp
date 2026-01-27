@@ -138,14 +138,14 @@ Shows status information about the wrapper and Claude Code process.
 
 ## Scrollback
 
-The wrapper includes a built-in scrollback buffer (like a mini tmux):
+The wrapper includes a built-in scrollback buffer using the `vt100` crate for proper terminal emulation:
 
-- **Mouse wheel up**: Enter scroll mode and scroll up through history
-- **Mouse wheel down**: Scroll down (exits scroll mode when reaching bottom)
-- **Page Up/Down**: Scroll by page when in scroll mode
+- **Page Up**: Enter scroll mode and scroll up through history
+- **Page Down**: Scroll down (exits scroll mode when reaching bottom)
+- **Arrow Up/Down**: Scroll line by line when in scroll mode
 - **q or Esc**: Exit scroll mode and return to live view
 
-The scrollback captures output before Claude's TUI enters alternate screen mode. This means you can scroll through startup messages, errors, and any output that appears before or after Claude's main interface.
+The scrollback uses vt100 terminal emulation to properly parse and render terminal output, preserving colors and formatting.
 
 ## Platform Support
 

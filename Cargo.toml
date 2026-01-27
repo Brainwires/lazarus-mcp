@@ -25,6 +25,9 @@ which = "7"
 dirs = "6"
 ctrlc = "3"
 
+# Terminal emulation for scrollback
+vt100 = "0.16"
+
 # Unix process control
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
