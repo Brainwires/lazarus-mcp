@@ -555,7 +555,8 @@ fn forward_io(
                 info!("Injecting prompt after restart: {}", prompt);
                 let _ = signal::kill(child, Signal::SIGWINCH);
                 std::thread::sleep(Duration::from_millis(100));
-                let msg = format!("{}\n", prompt);
+                // Use \r (carriage return) - that's what Enter sends in raw terminal mode
+                let msg = format!("{}\r", prompt);
                 unsafe { libc::write(master_fd, msg.as_ptr() as *const _, msg.len()) };
                 prompt_injected = true;
             }
