@@ -129,11 +129,23 @@ Shows status information about the wrapper and Claude Code process.
 - **Terminal preserved** - Wrapper owns terminal, Claude is just a child
 - **Full PTY passthrough** - Complete terminal emulation with proper size handling
 - **Terminal resize support** - SIGWINCH propagation keeps Claude's display correct
+- **Scrollback buffer** - 10,000 lines of history with mouse wheel scrolling
 - **Session continuation** - Restart always uses `--continue` to resume conversation
 - **Prompt injection** - Optionally auto-send a prompt after restart to continue work seamlessly
 - **Simple signaling** - File-based IPC, no complex sockets or daemons
 - **Graceful shutdown** - SIGINT (3s) → SIGTERM (2s) → SIGKILL sequence
 - **Raw mode passthrough** - All keyboard input forwarded correctly
+
+## Scrollback
+
+The wrapper includes a built-in scrollback buffer (like a mini tmux):
+
+- **Mouse wheel up**: Enter scroll mode and scroll up through history
+- **Mouse wheel down**: Scroll down (exits scroll mode when reaching bottom)
+- **Page Up/Down**: Scroll by page when in scroll mode
+- **q or Esc**: Exit scroll mode and return to live view
+
+The scrollback captures output before Claude's TUI enters alternate screen mode. This means you can scroll through startup messages, errors, and any output that appears before or after Claude's main interface.
 
 ## Platform Support
 

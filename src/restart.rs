@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::info;
 
@@ -41,16 +40,6 @@ fn get_parent_pid() -> Option<u32> {
     parts.get(1)?.parse().ok()
 }
 
-/// Get the grandparent PID (should be wrapper when running as MCP server under Claude)
-fn get_grandparent_pid() -> Option<u32> {
-    let parent_pid = get_parent_pid()?;
-    let stat = fs::read_to_string(format!("/proc/{}/stat", parent_pid)).ok()?;
-    let close_paren = stat.rfind(')')?;
-    let after_comm = &stat[close_paren + 2..];
-    let parts: Vec<&str> = after_comm.split_whitespace().collect();
-    parts.get(1)?.parse().ok()
-}
-
 /// Get the current working directory of a process
 fn get_cwd(pid: u32) -> Option<String> {
     fs::read_link(format!("/proc/{}/cwd", pid))
@@ -80,9 +69,6 @@ fn find_wrapper_pid() -> Option<u32> {
 
         // Check if this is the wrapper
         if comm.contains("rusty-restart") {
-            // Verify the signal file would exist for this PID
-            let signal_path = format!("{}{}", SIGNAL_FILE_PREFIX, current_pid);
-            // The wrapper creates its signal file path, so we check if this PID looks like a wrapper
             return Some(current_pid);
         }
 

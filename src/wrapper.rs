@@ -6,6 +6,7 @@ use nix::sys::termios::{self, SetArg};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{dup2, execvp, fork, setsid, ForkResult, Pid};
 use serde_json;
+use std::collections::VecDeque;
 use std::ffi::CString;
 use std::fs;
 use std::io::Write;
@@ -21,6 +22,259 @@ use tracing::info;
 static MASTER_PTY_FD: AtomicI32 = AtomicI32::new(-1);
 
 const SIGNAL_FILE_PREFIX: &str = "/tmp/rusty-restart-claude-";
+
+// Scrollback buffer configuration
+const SCROLLBACK_LINES: usize = 10000;
+
+/// Scrollback buffer that stores terminal output line by line
+struct ScrollBuffer {
+    lines: VecDeque<Vec<u8>>,
+    current_line: Vec<u8>,
+    max_lines: usize,
+    // Track if app is in alternate screen mode (no scrollback there)
+    in_alternate_screen: bool,
+}
+
+impl ScrollBuffer {
+    fn new(max_lines: usize) -> Self {
+        Self {
+            lines: VecDeque::with_capacity(max_lines),
+            current_line: Vec::new(),
+            max_lines,
+            in_alternate_screen: false,
+        }
+    }
+
+    fn push(&mut self, data: &[u8]) {
+        // Check for alternate screen mode sequences
+        for window in data.windows(8) {
+            // Enter alternate screen: \x1b[?1049h or \x1b[?47h
+            if window.starts_with(b"\x1b[?1049h") || window.starts_with(b"\x1b[?47h") {
+                self.in_alternate_screen = true;
+            }
+            // Exit alternate screen: \x1b[?1049l or \x1b[?47l
+            if window.starts_with(b"\x1b[?1049l") || window.starts_with(b"\x1b[?47l") {
+                self.in_alternate_screen = false;
+            }
+        }
+
+        // Don't buffer when in alternate screen mode
+        if self.in_alternate_screen {
+            return;
+        }
+
+        for &byte in data {
+            if byte == b'\n' {
+                // Finish current line and start new one
+                let line = std::mem::take(&mut self.current_line);
+                self.lines.push_back(line);
+                if self.lines.len() > self.max_lines {
+                    self.lines.pop_front();
+                }
+            } else if byte != b'\r' {
+                // Add to current line (ignore carriage return)
+                self.current_line.push(byte);
+            }
+        }
+    }
+
+    fn total_lines(&self) -> usize {
+        self.lines.len()
+    }
+
+    fn get_lines(&self, start: usize, count: usize) -> Vec<&[u8]> {
+        let mut result = Vec::new();
+        for i in start..std::cmp::min(start + count, self.lines.len()) {
+            if let Some(line) = self.lines.get(i) {
+                result.push(line.as_slice());
+            }
+        }
+        result
+    }
+
+    fn is_in_alternate_screen(&self) -> bool {
+        self.in_alternate_screen
+    }
+}
+
+/// Mouse event types we care about
+#[derive(Debug, PartialEq)]
+enum MouseEvent {
+    ScrollUp,
+    ScrollDown,
+    Other,
+}
+
+/// Parse mouse events from input buffer
+/// Returns (event, bytes_consumed)
+fn parse_mouse_event(data: &[u8]) -> Option<(MouseEvent, usize)> {
+    if data.len() < 3 {
+        return None;
+    }
+
+    // SGR mouse mode: \x1b[<Cb;Cx;CyM or \x1b[<Cb;Cx;Cym
+    if data.starts_with(b"\x1b[<") {
+        // Find the end (M or m)
+        if let Some(end_pos) = data.iter().position(|&b| b == b'M' || b == b'm') {
+            let params = &data[3..end_pos];
+            if let Ok(params_str) = std::str::from_utf8(params) {
+                let parts: Vec<&str> = params_str.split(';').collect();
+                if let Some(button_str) = parts.first() {
+                    if let Ok(button) = button_str.parse::<u8>() {
+                        // Button 64 = scroll up, 65 = scroll down
+                        let event = match button & 0x43 {
+                            64 => MouseEvent::ScrollUp,
+                            65 => MouseEvent::ScrollDown,
+                            _ => MouseEvent::Other,
+                        };
+                        return Some((event, end_pos + 1));
+                    }
+                }
+            }
+        }
+        return None;
+    }
+
+    // X10 mouse mode: \x1b[M Cb Cx Cy (3 bytes after \x1b[M)
+    if data.starts_with(b"\x1b[M") && data.len() >= 6 {
+        let button = data[3].wrapping_sub(32);
+        // Button 64 = scroll up, 65 = scroll down
+        let event = match button & 0x43 {
+            64 => MouseEvent::ScrollUp,
+            65 => MouseEvent::ScrollDown,
+            _ => MouseEvent::Other,
+        };
+        return Some((event, 6));
+    }
+
+    None
+}
+
+/// Scroll view state
+struct ScrollView {
+    active: bool,
+    offset: usize, // Lines from bottom (0 = at bottom/live)
+    term_rows: u16,
+    term_cols: u16,
+}
+
+impl ScrollView {
+    fn new() -> Self {
+        Self {
+            active: false,
+            offset: 0,
+            term_rows: 24,
+            term_cols: 80,
+        }
+    }
+
+    fn update_size(&mut self, rows: u16, cols: u16) {
+        self.term_rows = rows;
+        self.term_cols = cols;
+    }
+
+    fn scroll_up(&mut self, buffer: &ScrollBuffer, lines: usize) {
+        let max_offset = buffer.total_lines().saturating_sub(self.term_rows as usize);
+        self.offset = std::cmp::min(self.offset + lines, max_offset);
+        self.active = true;
+    }
+
+    fn scroll_down(&mut self, lines: usize) {
+        if self.offset <= lines {
+            self.offset = 0;
+            self.active = false;
+        } else {
+            self.offset -= lines;
+        }
+    }
+
+    fn render(&self, buffer: &ScrollBuffer) {
+        let total = buffer.total_lines();
+        let visible_rows = self.term_rows as usize - 1; // Leave room for status line
+
+        // Calculate which lines to show
+        let end_line = total.saturating_sub(self.offset);
+        let start_line = end_line.saturating_sub(visible_rows);
+
+        // Save cursor, clear screen, move to top
+        print!("\x1b[s\x1b[2J\x1b[H");
+
+        // Render lines
+        let lines = buffer.get_lines(start_line, visible_rows);
+        for line in lines {
+            // Strip any escape sequences for clean display in scroll mode
+            let clean = strip_escapes(line);
+            let display: String = clean.iter().map(|&b| b as char).collect();
+            // Truncate to terminal width
+            let truncated: String = display.chars().take(self.term_cols as usize).collect();
+            println!("{}", truncated);
+        }
+
+        // Status line at bottom
+        print!("\x1b[{};1H", self.term_rows);
+        print!("\x1b[7m"); // Reverse video
+        let status = format!(
+            " SCROLL [{}/{}] - Mouse wheel or PgUp/PgDn to scroll, q/Esc to exit ",
+            total.saturating_sub(self.offset),
+            total
+        );
+        let padded: String = format!("{:width$}", status, width = self.term_cols as usize);
+        print!("{}", &padded[..std::cmp::min(padded.len(), self.term_cols as usize)]);
+        print!("\x1b[0m"); // Reset
+
+        let _ = std::io::stdout().flush();
+    }
+
+    fn exit(&mut self) {
+        self.active = false;
+        self.offset = 0;
+        // Restore cursor
+        print!("\x1b[u");
+        let _ = std::io::stdout().flush();
+    }
+}
+
+/// Strip ANSI escape sequences from a byte slice
+fn strip_escapes(data: &[u8]) -> Vec<u8> {
+    let mut result = Vec::new();
+    let mut i = 0;
+    while i < data.len() {
+        if data[i] == 0x1b && i + 1 < data.len() {
+            // Skip escape sequence
+            if data[i + 1] == b'[' {
+                // CSI sequence - find end
+                i += 2;
+                while i < data.len() {
+                    let c = data[i];
+                    i += 1;
+                    if (0x40..=0x7e).contains(&c) {
+                        break;
+                    }
+                }
+            } else if data[i + 1] == b']' {
+                // OSC sequence - find ST or BEL
+                i += 2;
+                while i < data.len() {
+                    if data[i] == 0x07 {
+                        i += 1;
+                        break;
+                    }
+                    if i + 1 < data.len() && data[i] == 0x1b && data[i + 1] == b'\\' {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+            } else {
+                i += 2;
+            }
+        } else {
+            result.push(data[i]);
+            i += 1;
+        }
+    }
+    result
+}
 
 /// Get the current terminal window size
 fn get_terminal_size() -> Option<Winsize> {
@@ -255,6 +509,10 @@ fn run_claude_with_pty(
         termios::tcsetattr(&stdin, SetArg::TCSANOW, &raw)?;
     }
 
+    // Enable mouse reporting (SGR mode for better compatibility)
+    print!("\x1b[?1000h\x1b[?1006h");
+    let _ = std::io::stdout().flush();
+
     // Fork
     match unsafe { fork()? } {
         ForkResult::Child => {
@@ -297,10 +555,14 @@ fn run_claude_with_pty(
             // Close slave side
             drop(slave);
 
-            let result = forward_io(master, child, running, inject_prompt);
+            let result = forward_io(master, child, running, inject_prompt, winsize);
 
             // Clear the global master fd
             MASTER_PTY_FD.store(-1, Ordering::SeqCst);
+
+            // Disable mouse reporting
+            print!("\x1b[?1006l\x1b[?1000l");
+            let _ = std::io::stdout().flush();
 
             // Restore terminal settings
             if let Some(ref orig) = original_termios {
@@ -317,6 +579,7 @@ fn forward_io(
     child: Pid,
     running: Arc<AtomicBool>,
     inject_prompt: Option<String>,
+    winsize: Option<Winsize>,
 ) -> Result<ExitReason> {
     let master_fd = master.as_raw_fd();
 
@@ -337,8 +600,18 @@ fn forward_io(
 
     // Track if we need to inject a prompt after startup
     let mut prompt_to_inject = inject_prompt;
-    let mut startup_time = Instant::now();
+    let startup_time = Instant::now();
     let mut prompt_injected = false;
+
+    // Scrollback buffer and view
+    let mut scroll_buffer = ScrollBuffer::new(SCROLLBACK_LINES);
+    let mut scroll_view = ScrollView::new();
+    if let Some(ref ws) = winsize {
+        scroll_view.update_size(ws.ws_row, ws.ws_col);
+    }
+
+    // Input buffer for handling escape sequences that span reads
+    let mut input_buffer: Vec<u8> = Vec::new();
 
     loop {
         // Check if wrapper should stop
@@ -352,7 +625,17 @@ fn forward_io(
         if last_signal_check.elapsed() > Duration::from_millis(100) {
             last_signal_check = Instant::now();
 
+            // Update terminal size for scroll view
+            if let Some(ws) = get_terminal_size() {
+                scroll_view.update_size(ws.ws_row, ws.ws_col);
+            }
+
             if let Some(signal_content) = check_restart_signal() {
+                // Exit scroll mode if active
+                if scroll_view.active {
+                    scroll_view.exit();
+                }
+
                 // Send SIGINT to claude for graceful shutdown
                 let _ = signal::kill(child, Signal::SIGINT);
 
@@ -439,8 +722,16 @@ fn forward_io(
         if poll_fds[0].revents & libc::POLLIN != 0 {
             let n = unsafe { libc::read(master_fd, buf.as_mut_ptr() as *mut _, buf.len()) };
             if n > 0 {
-                let _ = std::io::stdout().write_all(&buf[..n as usize]);
-                let _ = std::io::stdout().flush();
+                let data = &buf[..n as usize];
+
+                // Add to scrollback buffer
+                scroll_buffer.push(data);
+
+                // Only show output if not in scroll view mode
+                if !scroll_view.active {
+                    let _ = std::io::stdout().write_all(data);
+                    let _ = std::io::stdout().flush();
+                }
             } else if n == 0 {
                 // EOF from PTY
                 return Ok(ExitReason::NormalExit(0));
@@ -451,7 +742,112 @@ fn forward_io(
         if poll_fds[1].revents & libc::POLLIN != 0 {
             let n = unsafe { libc::read(stdin_fd, buf.as_mut_ptr() as *mut _, buf.len()) };
             if n > 0 {
-                unsafe { libc::write(master_fd, buf.as_ptr() as *const _, n as usize) };
+                let data = &buf[..n as usize];
+                input_buffer.extend_from_slice(data);
+
+                // Process input buffer for mouse events and keys
+                let mut i = 0;
+                while i < input_buffer.len() {
+                    // Check for mouse events
+                    if let Some((event, consumed)) = parse_mouse_event(&input_buffer[i..]) {
+                        match event {
+                            MouseEvent::ScrollUp => {
+                                if !scroll_buffer.is_in_alternate_screen() {
+                                    scroll_view.scroll_up(&scroll_buffer, 3);
+                                    scroll_view.render(&scroll_buffer);
+                                }
+                            }
+                            MouseEvent::ScrollDown => {
+                                if scroll_view.active {
+                                    scroll_view.scroll_down(3);
+                                    if scroll_view.active {
+                                        scroll_view.render(&scroll_buffer);
+                                    } else {
+                                        // Exited scroll mode, redraw Claude's screen
+                                        let _ = signal::kill(child, Signal::SIGWINCH);
+                                    }
+                                }
+                            }
+                            MouseEvent::Other => {
+                                // Forward other mouse events to Claude
+                                if !scroll_view.active {
+                                    unsafe {
+                                        libc::write(
+                                            master_fd,
+                                            input_buffer[i..i + consumed].as_ptr() as *const _,
+                                            consumed,
+                                        )
+                                    };
+                                }
+                            }
+                        }
+                        i += consumed;
+                        continue;
+                    }
+
+                    // Check for scroll mode exit keys when in scroll mode
+                    if scroll_view.active {
+                        let exit_scroll = match input_buffer[i] {
+                            b'q' | b'Q' => true,
+                            0x1b if i + 1 < input_buffer.len() => {
+                                // Escape key (but not start of another sequence)
+                                input_buffer.get(i + 1).map_or(true, |&b| b != b'[' && b != b'O')
+                            }
+                            0x1b => true, // Plain escape
+                            _ => false,
+                        };
+
+                        if exit_scroll {
+                            scroll_view.exit();
+                            // Redraw Claude's screen
+                            let _ = signal::kill(child, Signal::SIGWINCH);
+                            i += 1;
+                            continue;
+                        }
+
+                        // Handle Page Up/Down in scroll mode
+                        if input_buffer[i..].starts_with(b"\x1b[5~") {
+                            // Page Up
+                            scroll_view.scroll_up(&scroll_buffer, scroll_view.term_rows as usize - 1);
+                            scroll_view.render(&scroll_buffer);
+                            i += 4;
+                            continue;
+                        }
+                        if input_buffer[i..].starts_with(b"\x1b[6~") {
+                            // Page Down
+                            scroll_view.scroll_down(scroll_view.term_rows as usize - 1);
+                            if scroll_view.active {
+                                scroll_view.render(&scroll_buffer);
+                            } else {
+                                let _ = signal::kill(child, Signal::SIGWINCH);
+                            }
+                            i += 4;
+                            continue;
+                        }
+
+                        // Ignore other input in scroll mode
+                        i += 1;
+                        continue;
+                    }
+
+                    // Not in scroll mode - forward to Claude
+                    // Find the end of this input chunk (either end of buffer or start of escape)
+                    let mut end = i + 1;
+                    while end < input_buffer.len() && input_buffer[end] != 0x1b {
+                        end += 1;
+                    }
+                    unsafe {
+                        libc::write(
+                            master_fd,
+                            input_buffer[i..end].as_ptr() as *const _,
+                            end - i,
+                        )
+                    };
+                    i = end;
+                }
+
+                // Keep any incomplete escape sequence for next iteration
+                input_buffer.clear();
             }
         }
     }
