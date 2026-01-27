@@ -7,8 +7,7 @@ use std::env;
 use tracing::Level;
 use tracing_subscriber::EnvFilter;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
 
     // Check if running as MCP server
@@ -25,7 +24,7 @@ async fn main() -> Result<()> {
             .with_target(false)
             .init();
 
-        mcp_server::run().await
+        mcp_server::run()
     } else {
         // Wrapper mode - log to stderr to not interfere with terminal
         tracing_subscriber::fmt()
@@ -39,6 +38,6 @@ async fn main() -> Result<()> {
 
         // Pass all args (except program name) to claude
         let claude_args: Vec<String> = args.into_iter().skip(1).collect();
-        wrapper::run(claude_args).await
+        wrapper::run(claude_args)
     }
 }

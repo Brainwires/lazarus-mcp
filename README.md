@@ -1,24 +1,24 @@
 # rusty-restart-claude
 
-A dual-mode Rust tool that enables restarting Claude Code to reload MCP servers during development.
+A minimal dual-mode Rust tool that enables restarting Claude Code to reload MCP servers during development.
 
 ## The Problem
 
-When using Claude Code to develop an MCP server, you need a way to restart Claude Code so it reconnects to the updated server. The challenge is preserving the terminal and session.
+When using Claude Code to develop an MCP server, you need a way to restart Claude Code so it reconnects to the updated server. The challenge is preserving the session context.
 
 ## The Solution
 
 This tool operates in two modes:
 
-1. **Wrapper mode (default)**: Wraps Claude Code, maintaining terminal ownership so it can restart Claude without losing the terminal
+1. **Wrapper mode (default)**: Lightweight process supervisor that monitors Claude and can restart it on demand
 2. **MCP server mode (`--mcp-server`)**: Runs as an MCP server that signals the wrapper to restart
 
 ### Architecture
 
 ```
 Terminal
-  └── rusty-restart-claude (wrapper)     <-- owns terminal, stays alive
-        └── claude --continue [args...]  <-- child process, can be restarted
+  └── rusty-restart-claude (wrapper)     <-- monitors for restart signals
+        └── claude --continue [args...]  <-- spawned directly, can be restarted
               └── MCP servers
                     └── rusty-restart-claude --mcp-server  <-- signals wrapper
 ```
@@ -71,6 +71,8 @@ rusty-restart-claude -p "Help me with..."
 alias claude='rusty-restart-claude'
 ```
 
+**Note:** The wrapper automatically adds `--allow-dangerously-skip-permissions` if not already provided, enabling seamless MCP tool usage.
+
 ### Step 3: Use the Restart Tool
 
 Once Claude is running through the wrapper, you can use the `restart_claude` tool:
@@ -86,10 +88,9 @@ Restart signal sent! Claude will restart momentarily and resume with --continue.
 ## How It Works
 
 1. User starts Claude via `rusty-restart-claude [args...]`
-2. Wrapper spawns Claude as a child process with full PTY passthrough
-3. Terminal size is inherited and resize events (SIGWINCH) are propagated
-4. Claude connects to MCP servers, including `rusty-restart-claude --mcp-server`
-5. When `restart_claude` tool is called:
+2. Wrapper spawns Claude as a direct child process
+3. Claude connects to MCP servers, including `rusty-restart-claude --mcp-server`
+4. When `restart_claude` tool is called:
    - MCP server writes a signal file to `/tmp/rusty-restart-claude-{wrapper-pid}`
    - Wrapper detects the signal file (polling every 100ms)
    - Wrapper sends SIGINT to Claude, waits for graceful exit
@@ -126,26 +127,14 @@ Shows status information about the wrapper and Claude Code process.
 
 ## Features
 
-- **Terminal preserved** - Wrapper owns terminal, Claude is just a child
-- **Full PTY passthrough** - Complete terminal emulation with proper size handling
-- **Terminal resize support** - SIGWINCH propagation keeps Claude's display correct
-- **Scrollback buffer** - 10,000 lines of history with mouse wheel scrolling
+- **Minimal overhead** - Simple process supervision without terminal interference
+- **Direct spawning** - Claude runs as a regular child process, no PTY complexity
+- **Auto-permissions** - Automatically adds `--allow-dangerously-skip-permissions` for seamless MCP tool usage
 - **Session continuation** - Restart always uses `--continue` to resume conversation
 - **Prompt passing** - Optionally pass a prompt via command-line on restart to continue work seamlessly
 - **Simple signaling** - File-based IPC, no complex sockets or daemons
 - **Graceful shutdown** - SIGINT (3s) → SIGTERM (2s) → SIGKILL sequence
-- **Raw mode passthrough** - All keyboard input forwarded correctly
-
-## Scrollback
-
-The wrapper includes a built-in scrollback buffer using the `vt100` crate for proper terminal emulation:
-
-- **Page Up**: Enter scroll mode and scroll up through history
-- **Page Down**: Scroll down (exits scroll mode when reaching bottom)
-- **Arrow Up/Down**: Scroll line by line when in scroll mode
-- **q or Esc**: Exit scroll mode and return to live view
-
-The scrollback uses vt100 terminal emulation to properly parse and render terminal output, preserving colors and formatting.
+- **Zero terminal interference** - No emulation layer that could break Claude's display
 
 ## Platform Support
 

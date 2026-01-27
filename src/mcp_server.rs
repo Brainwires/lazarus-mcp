@@ -6,7 +6,7 @@ use tracing::{debug, error, info};
 use crate::restart;
 
 /// MCP Server implementation
-pub async fn run() -> Result<()> {
+pub fn run() -> Result<()> {
     info!("Starting rusty-restart-claude MCP server");
 
     let stdin = std::io::stdin();
@@ -35,7 +35,7 @@ pub async fn run() -> Result<()> {
             }
         };
 
-        let response = handle_request(&request).await;
+        let response = handle_request(&request);
 
         if let Some(resp) = response {
             let resp_str = serde_json::to_string(&resp)?;
@@ -49,7 +49,7 @@ pub async fn run() -> Result<()> {
     Ok(())
 }
 
-async fn handle_request(request: &Value) -> Option<Value> {
+fn handle_request(request: &Value) -> Option<Value> {
     let method = request.get("method")?.as_str()?;
     let id = request.get("id").cloned();
 
@@ -57,7 +57,7 @@ async fn handle_request(request: &Value) -> Option<Value> {
         "initialize" => handle_initialize(),
         "initialized" => return None, // Notification, no response
         "tools/list" => handle_tools_list(),
-        "tools/call" => handle_tools_call(request.get("params")).await,
+        "tools/call" => handle_tools_call(request.get("params")),
         "ping" => json!({}),
         _ => {
             return Some(json!({
@@ -123,7 +123,7 @@ fn handle_tools_list() -> Value {
     })
 }
 
-async fn handle_tools_call(params: Option<&Value>) -> Value {
+fn handle_tools_call(params: Option<&Value>) -> Value {
     let params = match params {
         Some(p) => p,
         None => {
@@ -141,8 +141,8 @@ async fn handle_tools_call(params: Option<&Value>) -> Value {
     let arguments = params.get("arguments");
 
     match tool_name {
-        "restart_claude" => handle_restart_claude(arguments).await,
-        "server_status" => handle_server_status().await,
+        "restart_claude" => handle_restart_claude(arguments),
+        "server_status" => handle_server_status(),
         _ => json!({
             "content": [{
                 "type": "text",
@@ -153,7 +153,7 @@ async fn handle_tools_call(params: Option<&Value>) -> Value {
     }
 }
 
-async fn handle_restart_claude(arguments: Option<&Value>) -> Value {
+fn handle_restart_claude(arguments: Option<&Value>) -> Value {
     let reason = arguments
         .and_then(|a| a.get("reason"))
         .and_then(|r| r.as_str())
@@ -196,7 +196,7 @@ async fn handle_restart_claude(arguments: Option<&Value>) -> Value {
     }
 }
 
-async fn handle_server_status() -> Value {
+fn handle_server_status() -> Value {
     let status = restart::get_status();
 
     json!({
