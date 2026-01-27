@@ -769,16 +769,8 @@ fn forward_io(
                                 }
                             }
                             MouseEvent::Other => {
-                                // Forward other mouse events to Claude
-                                if !scroll_view.active {
-                                    unsafe {
-                                        libc::write(
-                                            master_fd,
-                                            input_buffer[i..i + consumed].as_ptr() as *const _,
-                                            consumed,
-                                        )
-                                    };
-                                }
+                                // Drop other mouse events - Claude's TUI handles mouse
+                                // via its own terminal, not via stdin
                             }
                         }
                         i += consumed;
