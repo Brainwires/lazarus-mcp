@@ -178,10 +178,16 @@ pub async fn run(claude_args: Vec<String>) -> Result<()> {
             args.push("--continue".to_string());
         }
 
+        // Add pending prompt as a command-line argument
+        if let Some(prompt) = pending_prompt.take() {
+            info!("Adding prompt as command-line argument: {}", prompt);
+            args.push(prompt);
+        }
+
         info!("Starting claude with args: {:?}", args);
 
-        // Run claude with PTY, passing any pending prompt
-        let exit_reason = run_claude_with_pty(&claude_path, &args, running.clone(), pending_prompt.take())?;
+        // Run claude with PTY
+        let exit_reason = run_claude_with_pty(&claude_path, &args, running.clone())?;
 
         match exit_reason {
             ExitReason::RestartRequested { reason, prompt } => {
@@ -231,7 +237,6 @@ fn run_claude_with_pty(
     claude_path: &PathBuf,
     args: &[String],
     running: Arc<AtomicBool>,
-    inject_prompt: Option<String>,
 ) -> Result<ExitReason> {
     // Get terminal size from real terminal
     let winsize = get_terminal_size();
@@ -304,7 +309,7 @@ fn run_claude_with_pty(
             // Close slave side
             drop(slave);
 
-            let result = forward_io(master, child, running, inject_prompt, rows, cols);
+            let result = forward_io(master, child, running, rows, cols);
 
             // Clear the global master fd
             MASTER_PTY_FD.store(-1, Ordering::SeqCst);
@@ -431,7 +436,6 @@ fn forward_io(
     master: OwnedFd,
     child: Pid,
     running: Arc<AtomicBool>,
-    inject_prompt: Option<String>,
     rows: u16,
     cols: u16,
 ) -> Result<ExitReason> {
@@ -449,11 +453,6 @@ fn forward_io(
 
     let mut buf = [0u8; 4096];
     let mut last_signal_check = Instant::now();
-
-    // Track if we need to inject a prompt after startup
-    let mut prompt_to_inject = inject_prompt;
-    let startup_time = Instant::now();
-    let mut prompt_injected = false;
 
     // Scroll mode with vt100 parser
     let mut scroll = ScrollMode::new(rows, cols);
@@ -547,33 +546,6 @@ fn forward_io(
 
         if ready <= 0 {
             continue;
-        }
-
-        // Inject prompt after Claude has had time to initialize
-        if !prompt_injected && prompt_to_inject.is_some() && startup_time.elapsed() > Duration::from_secs(3) {
-            if let Some(prompt) = prompt_to_inject.take() {
-                info!("Injecting prompt after restart: {}", prompt);
-
-                // Send SIGWINCH to ensure TUI is ready
-                let _ = signal::kill(child, Signal::SIGWINCH);
-                std::thread::sleep(Duration::from_millis(100));
-
-                // Send the prompt text character by character with small delays
-                // to simulate human typing
-                for byte in prompt.bytes() {
-                    unsafe { libc::write(master_fd, &byte as *const u8 as *const _, 1) };
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-
-                // Delay before Enter
-                std::thread::sleep(Duration::from_millis(100));
-
-                // Send Enter key as carriage return
-                let enter: u8 = 0x0D; // \r
-                unsafe { libc::write(master_fd, &enter as *const u8 as *const _, 1) };
-
-                prompt_injected = true;
-            }
         }
 
         // Read from PTY master (claude's output)

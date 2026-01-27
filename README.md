@@ -104,14 +104,14 @@ Signals the wrapper to restart Claude Code.
 
 **Parameters:**
 - `reason` (optional, string): Reason for the restart (for logging)
-- `prompt` (optional, string): A prompt to automatically send after restart, enabling seamless continuation of work
+- `prompt` (optional, string): A prompt to pass as a command-line argument on restart, enabling seamless continuation of work
 
 **Example with prompt:**
 ```
 restart_claude(reason: "MCP server updated", prompt: "Continue where we left off - the MCP servers have been reloaded.")
 ```
 
-This triggers a restart and automatically sends the prompt to Claude after it initializes, continuing the workflow without manual intervention.
+This triggers a restart and passes the prompt as a command-line argument to Claude (like `claude --continue "prompt text"`), continuing the workflow without manual intervention.
 
 ### server_status
 
@@ -131,7 +131,7 @@ Shows status information about the wrapper and Claude Code process.
 - **Terminal resize support** - SIGWINCH propagation keeps Claude's display correct
 - **Scrollback buffer** - 10,000 lines of history with mouse wheel scrolling
 - **Session continuation** - Restart always uses `--continue` to resume conversation
-- **Prompt injection** - Optionally auto-send a prompt after restart to continue work seamlessly
+- **Prompt passing** - Optionally pass a prompt via command-line on restart to continue work seamlessly
 - **Simple signaling** - File-based IPC, no complex sockets or daemons
 - **Graceful shutdown** - SIGINT (3s) → SIGTERM (2s) → SIGKILL sequence
 - **Raw mode passthrough** - All keyboard input forwarded correctly
