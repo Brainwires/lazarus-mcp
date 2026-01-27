@@ -553,11 +553,25 @@ fn forward_io(
         if !prompt_injected && prompt_to_inject.is_some() && startup_time.elapsed() > Duration::from_secs(3) {
             if let Some(prompt) = prompt_to_inject.take() {
                 info!("Injecting prompt after restart: {}", prompt);
+
+                // Send SIGWINCH to ensure TUI is ready
                 let _ = signal::kill(child, Signal::SIGWINCH);
                 std::thread::sleep(Duration::from_millis(100));
-                // Use \r (carriage return) - that's what Enter sends in raw terminal mode
-                let msg = format!("{}\r", prompt);
-                unsafe { libc::write(master_fd, msg.as_ptr() as *const _, msg.len()) };
+
+                // Send the prompt text character by character with small delays
+                // to simulate human typing
+                for byte in prompt.bytes() {
+                    unsafe { libc::write(master_fd, &byte as *const u8 as *const _, 1) };
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+
+                // Delay before Enter
+                std::thread::sleep(Duration::from_millis(100));
+
+                // Send Enter key as carriage return
+                let enter: u8 = 0x0D; // \r
+                unsafe { libc::write(master_fd, &enter as *const u8 as *const _, 1) };
+
                 prompt_injected = true;
             }
         }
