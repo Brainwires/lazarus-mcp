@@ -10,23 +10,46 @@ use std::process::{self, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::info;
+use tracing::{info, warn};
 
-const SIGNAL_FILE_PREFIX: &str = "/tmp/rusty-restart-claude-";
+use crate::privileges;
 
+const SIGNAL_FILE_PREFIX: &str = "/tmp/aegis-mcp-";
+
+/// Agent-specific configuration
+struct AgentConfig {
+    /// Name of the agent
+    name: String,
+    /// Path to the executable
+    path: PathBuf,
+    /// Flag to continue/resume session (if supported)
+    continue_flag: Option<&'static str>,
+    /// Flag to skip permission prompts (if supported)
+    skip_permissions_flag: Option<&'static str>,
+}
 
 /// Get the signal file path for this wrapper instance
 pub fn signal_file_path() -> PathBuf {
     PathBuf::from(format!("{}{}", SIGNAL_FILE_PREFIX, process::id()))
 }
 
-/// Find the claude executable
-fn find_claude() -> Result<PathBuf> {
-    // Try common locations
+/// Find an agent executable by name
+fn find_agent(agent_name: &str) -> Result<AgentConfig> {
+    match agent_name.to_lowercase().as_str() {
+        "claude" => find_claude(),
+        "cursor" => find_cursor(),
+        "aider" => find_aider(),
+        _ => anyhow::bail!(
+            "Unknown agent '{}'. Supported agents: claude, cursor, aider",
+            agent_name
+        ),
+    }
+}
+
+/// Find the Claude Code executable
+fn find_claude() -> Result<AgentConfig> {
     let candidates = [
-        // Check if 'claude' is in PATH
         which::which("claude").ok(),
-        // Common install locations
         Some(PathBuf::from("/usr/local/bin/claude")),
         Some(PathBuf::from("/usr/bin/claude")),
         dirs::home_dir().map(|h| h.join(".local/bin/claude")),
@@ -35,7 +58,12 @@ fn find_claude() -> Result<PathBuf> {
 
     for candidate in candidates.into_iter().flatten() {
         if candidate.exists() && candidate.is_file() {
-            return Ok(candidate);
+            return Ok(AgentConfig {
+                name: "claude".to_string(),
+                path: candidate,
+                continue_flag: Some("--continue"),
+                skip_permissions_flag: Some("--dangerously-skip-permissions"),
+            });
         }
     }
 
@@ -43,7 +71,6 @@ fn find_claude() -> Result<PathBuf> {
     if let Some(home) = dirs::home_dir() {
         let versions_dir = home.join(".local/share/claude/versions");
         if versions_dir.exists() {
-            // Find the latest version directory
             if let Ok(entries) = fs::read_dir(&versions_dir) {
                 let mut versions: Vec<_> = entries
                     .filter_map(|e| e.ok())
@@ -54,7 +81,12 @@ fn find_claude() -> Result<PathBuf> {
                 if let Some(latest) = versions.first() {
                     let claude_path = latest.path().join("claude");
                     if claude_path.exists() {
-                        return Ok(claude_path);
+                        return Ok(AgentConfig {
+                            name: "claude".to_string(),
+                            path: claude_path,
+                            continue_flag: Some("--continue"),
+                            skip_permissions_flag: Some("--dangerously-skip-permissions"),
+                        });
                     }
                 }
             }
@@ -62,6 +94,54 @@ fn find_claude() -> Result<PathBuf> {
     }
 
     anyhow::bail!("Could not find claude executable. Make sure Claude Code is installed.")
+}
+
+/// Find the Cursor editor executable
+fn find_cursor() -> Result<AgentConfig> {
+    let candidates = [
+        which::which("cursor").ok(),
+        Some(PathBuf::from("/usr/local/bin/cursor")),
+        Some(PathBuf::from("/usr/bin/cursor")),
+        dirs::home_dir().map(|h| h.join(".local/bin/cursor")),
+        // AppImage location
+        dirs::home_dir().map(|h| h.join("Applications/cursor.AppImage")),
+    ];
+
+    for candidate in candidates.into_iter().flatten() {
+        if candidate.exists() && candidate.is_file() {
+            return Ok(AgentConfig {
+                name: "cursor".to_string(),
+                path: candidate,
+                continue_flag: None, // Cursor doesn't have a continue flag
+                skip_permissions_flag: None,
+            });
+        }
+    }
+
+    anyhow::bail!("Could not find cursor executable. Make sure Cursor is installed.")
+}
+
+/// Find the Aider CLI executable
+fn find_aider() -> Result<AgentConfig> {
+    let candidates = [
+        which::which("aider").ok(),
+        Some(PathBuf::from("/usr/local/bin/aider")),
+        Some(PathBuf::from("/usr/bin/aider")),
+        dirs::home_dir().map(|h| h.join(".local/bin/aider")),
+    ];
+
+    for candidate in candidates.into_iter().flatten() {
+        if candidate.exists() && candidate.is_file() {
+            return Ok(AgentConfig {
+                name: "aider".to_string(),
+                path: candidate,
+                continue_flag: None, // Aider auto-continues via chat history
+                skip_permissions_flag: Some("--yes"), // Auto-confirm prompts
+            });
+        }
+    }
+
+    anyhow::bail!("Could not find aider executable. Install with: pip install aider-chat")
 }
 
 /// Parsed restart signal
@@ -102,10 +182,20 @@ fn check_restart_signal() -> Option<ParsedRestartSignal> {
 }
 
 /// Run the wrapper
-pub fn run(claude_args: Vec<String>) -> Result<()> {
-    let claude_path = find_claude()?;
-    info!("Found claude at: {:?}", claude_path);
+pub fn run(agent_name: String, agent_args: Vec<String>, keep_root: bool) -> Result<()> {
+    let agent = find_agent(&agent_name)?;
+    info!("Found {} at: {:?}", agent.name, agent.path);
     info!("Wrapper PID: {}", process::id());
+
+    // Handle root privileges
+    if privileges::is_root() {
+        if keep_root {
+            warn!("Running as root with --keep-root flag. Agent will run with elevated privileges.");
+        } else {
+            info!("Running as root, will drop privileges before spawning agent");
+            privileges::drop_privileges()?;
+        }
+    }
 
     // Clean up any stale signal file
     let _ = fs::remove_file(signal_file_path());
@@ -123,17 +213,23 @@ pub fn run(claude_args: Vec<String>) -> Result<()> {
 
     while running.load(Ordering::SeqCst) {
         // Build args for this run
-        let mut args = claude_args.clone();
+        let mut args = agent_args.clone();
 
-        // Always add --allow-dangerously-skip-permissions if not already present
-        if !args.iter().any(|a| a == "--allow-dangerously-skip-permissions") {
-            args.push("--allow-dangerously-skip-permissions".to_string());
-            info!("Auto-adding --allow-dangerously-skip-permissions flag");
+        // Add skip-permissions flag if agent supports it and not already present
+        if let Some(skip_flag) = agent.skip_permissions_flag {
+            if !args.iter().any(|a| a == skip_flag) {
+                args.push(skip_flag.to_string());
+                info!("Auto-adding {} flag", skip_flag);
+            }
         }
 
-        // Add --continue on restarts if not already present
-        if add_continue && !args.iter().any(|a| a == "--continue" || a == "-c") {
-            args.push("--continue".to_string());
+        // Add continue flag on restarts if agent supports it and not already present
+        if add_continue {
+            if let Some(continue_flag) = agent.continue_flag {
+                if !args.iter().any(|a| a == continue_flag || a == "-c") {
+                    args.push(continue_flag.to_string());
+                }
+            }
         }
 
         // Add pending prompt as a command-line argument
@@ -142,10 +238,10 @@ pub fn run(claude_args: Vec<String>) -> Result<()> {
             args.push(prompt);
         }
 
-        info!("Starting claude with args: {:?}", args);
+        info!("Starting {} with args: {:?}", agent.name, args);
 
-        // Spawn Claude directly without any PTY or terminal emulation
-        let exit_reason = run_claude(&claude_path, &args, running.clone())?;
+        // Spawn agent directly without any PTY or terminal emulation
+        let exit_reason = run_agent(&agent.path, &args, running.clone())?;
 
         match exit_reason {
             ExitReason::RestartRequested { reason, prompt } => {
@@ -154,7 +250,7 @@ pub fn run(claude_args: Vec<String>) -> Result<()> {
                 pending_prompt = prompt;
 
                 // Clear terminal and reset before restart
-                // This helps ensure Claude's TUI renders properly
+                // This helps ensure the agent's TUI renders properly
                 print!("\x1b[2J\x1b[H\x1b[0m");
                 let _ = std::io::stdout().flush();
 
@@ -163,11 +259,11 @@ pub fn run(claude_args: Vec<String>) -> Result<()> {
                 continue;
             }
             ExitReason::NormalExit(code) => {
-                info!("Claude exited with code: {}", code);
+                info!("{} exited with code: {}", agent.name, code);
                 process::exit(code);
             }
             ExitReason::Signal(sig) => {
-                info!("Claude killed by signal: {:?}", sig);
+                info!("{} killed by signal: {:?}", agent.name, sig);
                 break;
             }
             ExitReason::WrapperShutdown => {
@@ -191,17 +287,17 @@ enum ExitReason {
     WrapperShutdown,
 }
 
-/// Run Claude as a simple child process without any PTY or terminal emulation
-fn run_claude(
-    claude_path: &PathBuf,
+/// Run an agent as a simple child process without any PTY or terminal emulation
+fn run_agent(
+    agent_path: &PathBuf,
     args: &[String],
     running: Arc<AtomicBool>,
 ) -> Result<ExitReason> {
-    // Spawn Claude directly - no PTY, no terminal emulation
-    let mut child = Command::new(claude_path)
+    // Spawn agent directly - no PTY, no terminal emulation
+    let mut child = Command::new(agent_path)
         .args(args)
         .spawn()
-        .context("Failed to spawn Claude")?;
+        .context("Failed to spawn agent")?;
 
     let child_pid = Pid::from_raw(child.id() as i32);
 
@@ -217,7 +313,7 @@ fn run_claude(
         if let Some(signal_content) = check_restart_signal() {
             info!("Restart signal detected: {}", signal_content.reason);
 
-            // Send SIGINT to Claude for graceful shutdown
+            // Send SIGINT to agent for graceful shutdown
             let _ = signal::kill(child_pid, Signal::SIGINT);
 
             // Wait for it to exit (with timeout escalation)
@@ -227,11 +323,11 @@ fn run_claude(
                     Ok(WaitStatus::Exited(_, _)) | Ok(WaitStatus::Signaled(_, _, _)) => break,
                     Ok(WaitStatus::StillAlive) => {
                         if start.elapsed() > Duration::from_secs(3) {
-                            info!("Claude not responding to SIGINT, sending SIGTERM");
+                            info!("Agent not responding to SIGINT, sending SIGTERM");
                             let _ = signal::kill(child_pid, Signal::SIGTERM);
                         }
                         if start.elapsed() > Duration::from_secs(5) {
-                            info!("Claude not responding to SIGTERM, sending SIGKILL");
+                            info!("Agent not responding to SIGTERM, sending SIGKILL");
                             let _ = signal::kill(child_pid, Signal::SIGKILL);
                             break;
                         }

@@ -1,13 +1,36 @@
+//! MCP Server Implementation
+//!
+//! Implements the MCP (Model Context Protocol) server that exposes aegis-mcp's capabilities.
+
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
+use std::sync::Arc;
+use tokio::runtime::Runtime;
+use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 
+use crate::pool::{AgentPool, AgentStatus, Task, TaskPriority};
 use crate::restart;
+
+/// Lazy-initialized agent pool
+static POOL: std::sync::OnceLock<Arc<RwLock<AgentPool>>> = std::sync::OnceLock::new();
+
+/// Get or create the agent pool
+fn get_pool() -> Arc<RwLock<AgentPool>> {
+    POOL.get_or_init(|| {
+        info!("Initializing agent pool");
+        Arc::new(RwLock::new(AgentPool::new(5)))
+    })
+    .clone()
+}
 
 /// MCP Server implementation
 pub fn run() -> Result<()> {
-    info!("Starting rusty-restart-claude MCP server");
+    info!("Starting aegis-mcp MCP server");
+
+    // Create tokio runtime for async operations
+    let rt = Runtime::new()?;
 
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
@@ -35,7 +58,7 @@ pub fn run() -> Result<()> {
             }
         };
 
-        let response = handle_request(&request);
+        let response = rt.block_on(handle_request(&request));
 
         if let Some(resp) = response {
             let resp_str = serde_json::to_string(&resp)?;
@@ -45,11 +68,17 @@ pub fn run() -> Result<()> {
         }
     }
 
+    // Cleanup
     info!("MCP server shutting down");
+    rt.block_on(async {
+        let pool = get_pool();
+        pool.read().await.shutdown().await;
+    });
+
     Ok(())
 }
 
-fn handle_request(request: &Value) -> Option<Value> {
+async fn handle_request(request: &Value) -> Option<Value> {
     let method = request.get("method")?.as_str()?;
     let id = request.get("id").cloned();
 
@@ -57,7 +86,7 @@ fn handle_request(request: &Value) -> Option<Value> {
         "initialize" => handle_initialize(),
         "initialized" => return None, // Notification, no response
         "tools/list" => handle_tools_list(),
-        "tools/call" => handle_tools_call(request.get("params")),
+        "tools/call" => handle_tools_call(request.get("params")).await,
         "ping" => json!({}),
         _ => {
             return Some(json!({
@@ -85,7 +114,7 @@ fn handle_initialize() -> Value {
             "tools": {}
         },
         "serverInfo": {
-            "name": "rusty-restart-claude",
+            "name": "aegis-mcp",
             "version": env!("CARGO_PKG_VERSION")
         }
     })
@@ -94,9 +123,10 @@ fn handle_initialize() -> Value {
 fn handle_tools_list() -> Value {
     json!({
         "tools": [
+            // Existing restart tools
             {
                 "name": "restart_claude",
-                "description": "Restart Claude Code to reconnect all MCP servers. Use this after making changes to an MCP server's code. Requires Claude to be started via the rusty-restart-claude wrapper. The session will automatically continue with --continue. Optionally include a prompt to auto-send after restart.",
+                "description": "Restart the AI coding agent to reconnect all MCP servers. Use this after making changes to an MCP server's code. Requires the agent to be started via the aegis-mcp wrapper (e.g., 'aegis-mcp claude'). The session will automatically continue if the agent supports it. Optionally include a prompt to auto-send after restart.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -118,12 +148,115 @@ fn handle_tools_list() -> Value {
                     "type": "object",
                     "properties": {}
                 }
+            },
+            // Agent pool tools
+            {
+                "name": "agent_spawn",
+                "description": "Spawn a background agent to work on a task autonomously. The agent will execute the task in the background and report results. Returns the agent ID immediately.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "description": {
+                            "type": "string",
+                            "description": "Description of the task for the agent to execute"
+                        },
+                        "agent_type": {
+                            "type": "string",
+                            "enum": ["claude", "aider", "cursor"],
+                            "description": "Type of agent to spawn (default: claude)"
+                        },
+                        "working_directory": {
+                            "type": "string",
+                            "description": "Working directory for the agent"
+                        },
+                        "max_iterations": {
+                            "type": "integer",
+                            "description": "Maximum iterations before the agent gives up (default: 50)"
+                        },
+                        "priority": {
+                            "type": "string",
+                            "enum": ["low", "normal", "high", "urgent"],
+                            "description": "Task priority (default: normal)"
+                        }
+                    },
+                    "required": ["description"]
+                }
+            },
+            {
+                "name": "agent_list",
+                "description": "List all active background agents with their current status.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "agent_status",
+                "description": "Get detailed status of a specific background agent.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {
+                            "type": "string",
+                            "description": "ID of the agent to check"
+                        }
+                    },
+                    "required": ["agent_id"]
+                }
+            },
+            {
+                "name": "agent_await",
+                "description": "Wait for a background agent to complete and get its result. Blocks until the agent finishes (completes or fails).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {
+                            "type": "string",
+                            "description": "ID of the agent to wait for"
+                        },
+                        "timeout_secs": {
+                            "type": "integer",
+                            "description": "Optional timeout in seconds"
+                        }
+                    },
+                    "required": ["agent_id"]
+                }
+            },
+            {
+                "name": "agent_stop",
+                "description": "Stop a running background agent.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {
+                            "type": "string",
+                            "description": "ID of the agent to stop"
+                        }
+                    },
+                    "required": ["agent_id"]
+                }
+            },
+            {
+                "name": "agent_pool_stats",
+                "description": "Get statistics about the agent pool (active, running, completed agents).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "agent_file_locks",
+                "description": "List all currently held file locks by agents.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
             }
         ]
     })
 }
 
-fn handle_tools_call(params: Option<&Value>) -> Value {
+async fn handle_tools_call(params: Option<&Value>) -> Value {
     let params = match params {
         Some(p) => p,
         None => {
@@ -141,8 +274,17 @@ fn handle_tools_call(params: Option<&Value>) -> Value {
     let arguments = params.get("arguments");
 
     match tool_name {
+        // Existing tools
         "restart_claude" => handle_restart_claude(arguments),
         "server_status" => handle_server_status(),
+        // Agent pool tools
+        "agent_spawn" => handle_agent_spawn(arguments).await,
+        "agent_list" => handle_agent_list().await,
+        "agent_status" => handle_agent_status(arguments).await,
+        "agent_await" => handle_agent_await(arguments).await,
+        "agent_stop" => handle_agent_stop(arguments).await,
+        "agent_pool_stats" => handle_agent_pool_stats().await,
+        "agent_file_locks" => handle_agent_file_locks().await,
         _ => json!({
             "content": [{
                 "type": "text",
@@ -177,7 +319,7 @@ fn handle_restart_claude(arguments: Option<&Value>) -> Value {
                 "content": [{
                     "type": "text",
                     "text": format!(
-                        "Restart signal sent!\n\nWrapper PID: {}\nReason: {}{}\\n\nClaude will restart momentarily and resume with --continue.",
+                        "Restart signal sent!\n\nWrapper PID: {}\nReason: {}{}\n\nClaude will restart momentarily and resume with --continue.",
                         info.wrapper_pid,
                         reason,
                         prompt_msg
@@ -185,11 +327,11 @@ fn handle_restart_claude(arguments: Option<&Value>) -> Value {
                 }],
                 "isError": false
             })
-        },
+        }
         Err(e) => json!({
             "content": [{
                 "type": "text",
-                "text": format!("Failed to trigger restart: {}\n\nMake sure you started Claude via the rusty-restart-claude wrapper:\n  rusty-restart-claude [claude-args...]", e)
+                "text": format!("Failed to trigger restart: {}\n\nMake sure you started your agent via the aegis-mcp wrapper:\n  aegis-mcp <agent> [args...]\n\nExample: aegis-mcp claude --continue", e)
             }],
             "isError": true
         }),
@@ -203,6 +345,306 @@ fn handle_server_status() -> Value {
         "content": [{
             "type": "text",
             "text": serde_json::to_string_pretty(&status).unwrap_or_else(|_| format!("{:?}", status))
+        }],
+        "isError": false
+    })
+}
+
+// Agent pool tool handlers
+
+async fn handle_agent_spawn(arguments: Option<&Value>) -> Value {
+    let description = match arguments.and_then(|a| a.get("description")).and_then(|d| d.as_str()) {
+        Some(d) => d.to_string(),
+        None => {
+            return json!({
+                "content": [{
+                    "type": "text",
+                    "text": "Missing required parameter: description"
+                }],
+                "isError": true
+            });
+        }
+    };
+
+    let agent_type = arguments
+        .and_then(|a| a.get("agent_type"))
+        .and_then(|t| t.as_str())
+        .unwrap_or("claude")
+        .to_string();
+
+    let working_directory = arguments
+        .and_then(|a| a.get("working_directory"))
+        .and_then(|d| d.as_str())
+        .map(std::path::PathBuf::from);
+
+    let max_iterations = arguments
+        .and_then(|a| a.get("max_iterations"))
+        .and_then(|m| m.as_u64())
+        .unwrap_or(50) as u32;
+
+    let priority = match arguments
+        .and_then(|a| a.get("priority"))
+        .and_then(|p| p.as_str())
+        .unwrap_or("normal")
+    {
+        "low" => TaskPriority::Low,
+        "high" => TaskPriority::High,
+        "urgent" => TaskPriority::Urgent,
+        _ => TaskPriority::Normal,
+    };
+
+    let mut task = Task::new(&description)
+        .with_agent_type(&agent_type)
+        .with_max_iterations(max_iterations)
+        .with_priority(priority);
+
+    if let Some(dir) = working_directory {
+        task = task.with_working_directory(dir);
+    }
+
+    let pool = get_pool();
+    let pool = pool.read().await;
+
+    match pool.spawn(task).await {
+        Ok(agent_id) => json!({
+            "content": [{
+                "type": "text",
+                "text": format!(
+                    "Spawned background agent: {}\n\nTask: {}\nAgent type: {}\nMax iterations: {}",
+                    agent_id, description, agent_type, max_iterations
+                )
+            }],
+            "isError": false
+        }),
+        Err(e) => json!({
+            "content": [{
+                "type": "text",
+                "text": format!("Failed to spawn agent: {}", e)
+            }],
+            "isError": true
+        }),
+    }
+}
+
+async fn handle_agent_list() -> Value {
+    let pool = get_pool();
+    let pool = pool.read().await;
+    let agents = pool.list().await;
+
+    if agents.is_empty() {
+        return json!({
+            "content": [{
+                "type": "text",
+                "text": "No active background agents"
+            }],
+            "isError": false
+        });
+    }
+
+    let mut output = format!("{} active agent(s):\n\n", agents.len());
+    for (id, status) in agents {
+        let icon = match &status {
+            AgentStatus::Starting => "🔄",
+            AgentStatus::Running { .. } => "▶️",
+            AgentStatus::Completed { .. } => "✅",
+            AgentStatus::Failed { .. } => "❌",
+            AgentStatus::Stopped => "⏹️",
+        };
+        output.push_str(&format!("{} {} - {}\n", icon, id, status));
+    }
+
+    json!({
+        "content": [{
+            "type": "text",
+            "text": output
+        }],
+        "isError": false
+    })
+}
+
+async fn handle_agent_status(arguments: Option<&Value>) -> Value {
+    let agent_id = match arguments.and_then(|a| a.get("agent_id")).and_then(|i| i.as_str()) {
+        Some(id) => id,
+        None => {
+            return json!({
+                "content": [{
+                    "type": "text",
+                    "text": "Missing required parameter: agent_id"
+                }],
+                "isError": true
+            });
+        }
+    };
+
+    let pool = get_pool();
+    let pool = pool.read().await;
+
+    match pool.status(agent_id).await {
+        Some(status) => json!({
+            "content": [{
+                "type": "text",
+                "text": format!("Agent {}: {}", agent_id, status)
+            }],
+            "isError": false
+        }),
+        None => json!({
+            "content": [{
+                "type": "text",
+                "text": format!("Agent {} not found", agent_id)
+            }],
+            "isError": true
+        }),
+    }
+}
+
+async fn handle_agent_await(arguments: Option<&Value>) -> Value {
+    let agent_id = match arguments.and_then(|a| a.get("agent_id")).and_then(|i| i.as_str()) {
+        Some(id) => id.to_string(),
+        None => {
+            return json!({
+                "content": [{
+                    "type": "text",
+                    "text": "Missing required parameter: agent_id"
+                }],
+                "isError": true
+            });
+        }
+    };
+
+    let timeout_secs = arguments
+        .and_then(|a| a.get("timeout_secs"))
+        .and_then(|t| t.as_u64())
+        .map(|t| std::time::Duration::from_secs(t));
+
+    let pool = get_pool();
+    let pool = pool.read().await;
+
+    let result = if let Some(timeout) = timeout_secs {
+        pool.await_completion_timeout(&agent_id, timeout).await
+    } else {
+        pool.await_completion(&agent_id).await
+    };
+
+    match result {
+        Ok(task_result) => {
+            let status = if task_result.success { "succeeded" } else { "failed" };
+            let error_msg = task_result.error.map(|e| format!("\nError: {}", e)).unwrap_or_default();
+            json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!(
+                        "Agent {} {} after {} iterations.\n\nSummary: {}{}",
+                        agent_id, status, task_result.iterations, task_result.summary, error_msg
+                    )
+                }],
+                "isError": !task_result.success
+            })
+        }
+        Err(e) => json!({
+            "content": [{
+                "type": "text",
+                "text": format!("Error waiting for agent: {}", e)
+            }],
+            "isError": true
+        }),
+    }
+}
+
+async fn handle_agent_stop(arguments: Option<&Value>) -> Value {
+    let agent_id = match arguments.and_then(|a| a.get("agent_id")).and_then(|i| i.as_str()) {
+        Some(id) => id,
+        None => {
+            return json!({
+                "content": [{
+                    "type": "text",
+                    "text": "Missing required parameter: agent_id"
+                }],
+                "isError": true
+            });
+        }
+    };
+
+    let pool = get_pool();
+    let pool = pool.read().await;
+
+    match pool.stop(agent_id).await {
+        Ok(()) => json!({
+            "content": [{
+                "type": "text",
+                "text": format!("Stopped agent {}", agent_id)
+            }],
+            "isError": false
+        }),
+        Err(e) => json!({
+            "content": [{
+                "type": "text",
+                "text": format!("Failed to stop agent: {}", e)
+            }],
+            "isError": true
+        }),
+    }
+}
+
+async fn handle_agent_pool_stats() -> Value {
+    let pool = get_pool();
+    let pool = pool.read().await;
+    let stats = pool.stats().await;
+
+    json!({
+        "content": [{
+            "type": "text",
+            "text": format!(
+                "Agent Pool Statistics:\n\
+                 Max agents: {}\n\
+                 Total agents: {}\n\
+                 Running: {}\n\
+                 Completed: {}\n\
+                 Failed: {}",
+                stats.max_agents,
+                stats.total_agents,
+                stats.running,
+                stats.completed,
+                stats.failed
+            )
+        }],
+        "isError": false
+    })
+}
+
+async fn handle_agent_file_locks() -> Value {
+    let pool = get_pool();
+    let pool = pool.read().await;
+    let lock_manager = pool.lock_manager();
+    let locks = lock_manager.list_locks().await;
+
+    if locks.is_empty() {
+        return json!({
+            "content": [{
+                "type": "text",
+                "text": "No file locks currently held"
+            }],
+            "isError": false
+        });
+    }
+
+    let mut output = format!("{} file lock(s):\n\n", locks.len());
+    for (path, info) in locks {
+        let lock_type = match info.lock_type {
+            crate::pool::LockType::Read => "read",
+            crate::pool::LockType::Write => "write",
+        };
+        output.push_str(&format!(
+            "- {} ({}) by {}\n",
+            path.display(),
+            lock_type,
+            info.agent_id
+        ));
+    }
+
+    json!({
+        "content": [{
+            "type": "text",
+            "text": output
         }],
         "isError": false
     })
