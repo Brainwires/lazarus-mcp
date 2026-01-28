@@ -7,7 +7,7 @@ mod locks;
 mod task;
 
 pub use agent::{AgentConfig, AgentHandle, AgentStatus};
-pub use locks::{FileLockManager, LockInfo, LockType};
+pub use locks::{FileLockManager, LockType};
 pub use task::{Task, TaskPriority, TaskResult};
 
 use anyhow::{anyhow, Result};
@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 /// Statistics about the agent pool
 #[derive(Debug, Clone)]

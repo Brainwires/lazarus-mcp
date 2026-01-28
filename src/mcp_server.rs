@@ -10,6 +10,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 
+use crate::netmon;
 use crate::pool::{AgentPool, AgentStatus, Task, TaskPriority};
 use crate::restart;
 
@@ -251,6 +252,44 @@ fn handle_tools_list() -> Value {
                     "type": "object",
                     "properties": {}
                 }
+            },
+            // Network monitoring tools
+            {
+                "name": "netmon_status",
+                "description": "Get network monitoring status and statistics. Shows connection counts, bytes transferred, and top targets. Requires aegis-mcp to be started with --netmon flag.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "netmon_log",
+                "description": "Get recent network events from the monitoring log. Requires aegis-mcp to be started with --netmon flag.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "count": {
+                            "type": "integer",
+                            "description": "Number of recent events to return (default: 20)"
+                        }
+                    }
+                }
+            },
+            {
+                "name": "netmon_namespace_list",
+                "description": "List all aegis network namespaces. Network namespaces are used when --netmon=netns is specified (requires root).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "netmon_namespace_cleanup",
+                "description": "Clean up stale aegis network namespaces. Useful for recovery after crashes. Requires root privileges.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
             }
         ]
     })
@@ -285,6 +324,11 @@ async fn handle_tools_call(params: Option<&Value>) -> Value {
         "agent_stop" => handle_agent_stop(arguments).await,
         "agent_pool_stats" => handle_agent_pool_stats().await,
         "agent_file_locks" => handle_agent_file_locks().await,
+        // Network monitoring tools
+        "netmon_status" => handle_netmon_status(),
+        "netmon_log" => handle_netmon_log(arguments),
+        "netmon_namespace_list" => handle_netmon_namespace_list(),
+        "netmon_namespace_cleanup" => handle_netmon_namespace_cleanup(),
         _ => json!({
             "content": [{
                 "type": "text",
@@ -648,4 +692,196 @@ async fn handle_agent_file_locks() -> Value {
         }],
         "isError": false
     })
+}
+
+// Network monitoring tool handlers
+
+fn handle_netmon_status() -> Value {
+    // Look for the netmon log file in the standard location
+    let log_path = std::path::PathBuf::from(format!(
+        "/tmp/aegis-netmon-{}.jsonl",
+        find_wrapper_pid().unwrap_or(std::process::id())
+    ));
+
+    if !log_path.exists() {
+        return json!({
+            "content": [{
+                "type": "text",
+                "text": "Network monitoring not active.\n\nTo enable, start aegis-mcp with the --netmon flag:\n  aegis-mcp claude --netmon"
+            }],
+            "isError": false
+        });
+    }
+
+    match netmon::format_summary(&log_path) {
+        Ok(summary) => json!({
+            "content": [{
+                "type": "text",
+                "text": summary
+            }],
+            "isError": false
+        }),
+        Err(e) => json!({
+            "content": [{
+                "type": "text",
+                "text": format!("Error reading netmon log: {}", e)
+            }],
+            "isError": true
+        }),
+    }
+}
+
+fn handle_netmon_log(arguments: Option<&Value>) -> Value {
+    let count = arguments
+        .and_then(|a| a.get("count"))
+        .and_then(|c| c.as_u64())
+        .unwrap_or(20) as usize;
+
+    // Look for the netmon log file in the standard location
+    let log_path = std::path::PathBuf::from(format!(
+        "/tmp/aegis-netmon-{}.jsonl",
+        find_wrapper_pid().unwrap_or(std::process::id())
+    ));
+
+    if !log_path.exists() {
+        return json!({
+            "content": [{
+                "type": "text",
+                "text": "Network monitoring not active.\n\nTo enable, start aegis-mcp with the --netmon flag:\n  aegis-mcp claude --netmon"
+            }],
+            "isError": false
+        });
+    }
+
+    match netmon::recent_events(&log_path, count) {
+        Ok(events) => {
+            if events.is_empty() {
+                return json!({
+                    "content": [{
+                        "type": "text",
+                        "text": "No network events recorded yet."
+                    }],
+                    "isError": false
+                });
+            }
+
+            let mut output = format!("Recent {} network events:\n\n", events.len());
+            for event in events {
+                output.push_str(&format!("{}\n", serde_json::to_string(&event).unwrap_or_default()));
+            }
+
+            json!({
+                "content": [{
+                    "type": "text",
+                    "text": output
+                }],
+                "isError": false
+            })
+        }
+        Err(e) => json!({
+            "content": [{
+                "type": "text",
+                "text": format!("Error reading netmon log: {}", e)
+            }],
+            "isError": true
+        }),
+    }
+}
+
+fn handle_netmon_namespace_list() -> Value {
+    match netmon::netns::list_namespaces() {
+        Ok(namespaces) => {
+            if namespaces.is_empty() {
+                json!({
+                    "content": [{
+                        "type": "text",
+                        "text": "No aegis network namespaces found.\n\nNetwork namespaces are created when using --netmon=netns mode (requires root)."
+                    }],
+                    "isError": false
+                })
+            } else {
+                let mut output = format!("{} aegis network namespace(s):\n\n", namespaces.len());
+                for ns in namespaces {
+                    output.push_str(&format!("- {}\n", ns));
+                }
+                json!({
+                    "content": [{
+                        "type": "text",
+                        "text": output
+                    }],
+                    "isError": false
+                })
+            }
+        }
+        Err(e) => json!({
+            "content": [{
+                "type": "text",
+                "text": format!("Error listing namespaces: {}", e)
+            }],
+            "isError": true
+        }),
+    }
+}
+
+fn handle_netmon_namespace_cleanup() -> Value {
+    match netmon::netns::cleanup_all() {
+        Ok(count) => {
+            if count == 0 {
+                json!({
+                    "content": [{
+                        "type": "text",
+                        "text": "No stale network namespaces to clean up."
+                    }],
+                    "isError": false
+                })
+            } else {
+                json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("Cleaned up {} stale network namespace(s).", count)
+                    }],
+                    "isError": false
+                })
+            }
+        }
+        Err(e) => json!({
+            "content": [{
+                "type": "text",
+                "text": format!("Error cleaning up namespaces: {}. Make sure you have root privileges.", e)
+            }],
+            "isError": true
+        }),
+    }
+}
+
+/// Find the wrapper PID by walking up the process tree
+fn find_wrapper_pid() -> Option<u32> {
+    // Try to find the wrapper by checking parent processes
+    let mut current_pid = std::process::id();
+
+    for _ in 0..5 {
+        // Get parent PID
+        let stat = std::fs::read_to_string(format!("/proc/{}/stat", current_pid)).ok()?;
+        let close_paren = stat.rfind(')')?;
+        let after_comm = &stat[close_paren + 2..];
+        let parts: Vec<&str> = after_comm.split_whitespace().collect();
+        let parent_pid: u32 = parts.get(1)?.parse().ok()?;
+
+        if parent_pid <= 1 {
+            break;
+        }
+
+        // Check if parent is aegis-mcp
+        let comm = std::fs::read_to_string(format!("/proc/{}/comm", parent_pid))
+            .ok()
+            .map(|s| s.trim().to_string())?;
+
+        if comm.contains("aegis-mcp") {
+            return Some(parent_pid);
+        }
+
+        current_pid = parent_pid;
+    }
+
+    None
 }

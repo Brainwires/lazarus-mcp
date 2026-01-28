@@ -1,19 +1,57 @@
 # aegis-mcp
 
-A universal agent supervisor with hot-reload support for MCP servers. Wrap any AI coding agent and restart it on demand to reload MCP server changes during development.
+A universal agent supervisor with hot-reload support, multi-agent orchestration, and network monitoring for AI coding agents.
 
-## The Problem
+## Features
 
-When developing MCP servers, you need a way to restart your AI coding agent so it reconnects to the updated server. The challenge is preserving the session context across restarts.
+- **Hot-Reload** - Restart your AI agent to pick up MCP server changes without losing terminal context
+- **Multi-Agent Pool** - Spawn background agents to work on tasks autonomously
+- **Network Monitoring** - Track all network connections made by your agent (LD_PRELOAD or network namespace)
+- **Process Isolation** - MCP server auto-injection only affects the wrapped process
+- **Privilege Safety** - Automatically drops root privileges before spawning agents
+- **Multi-Agent Support** - Works with Claude Code, Cursor, Aider, and more
 
-## The Solution
+## Quick Start
 
-This tool operates in two modes:
+```bash
+# Install
+git clone https://github.com/Brainwires/aegis-mcp.git
+cd aegis-mcp
+cargo install --path .
 
-1. **Wrapper mode (default)**: Lightweight process supervisor that monitors any AI agent and can restart it on demand
-2. **MCP server mode (`--mcp-server`)**: Runs as an MCP server that signals the wrapper to restart
+# Build the hooks library (for network monitoring and MCP injection)
+cargo build -p aegis-hooks --release
 
-### Supported Agents
+# Run Claude Code through the wrapper
+aegis-mcp claude
+```
+
+That's it! The wrapper automatically:
+- Injects itself as an MCP server (process-isolated, no file modifications)
+- Adds permission-skipping flags appropriate for the agent
+- Uses `--continue` on restarts to preserve session context
+
+## Architecture
+
+```
+Terminal
+  └── aegis-mcp claude (wrapper)
+        │
+        ├── Environment: LD_PRELOAD=libaegis_hooks.so
+        │                AEGIS_MCP_OVERLAY=/tmp/aegis-mcp-overlay-{pid}.json
+        │                AEGIS_NETMON_LOG=/tmp/aegis-netmon-{pid}.jsonl (if --netmon)
+        │
+        └── claude --dangerously-skip-permissions
+              │
+              └── MCP servers (from overlay .mcp.json)
+                    └── aegis-mcp --mcp-server
+                          ├── restart_claude
+                          ├── agent_spawn/list/status/await/stop
+                          ├── agent_pool_stats
+                          └── netmon_status/log
+```
+
+## Supported Agents
 
 | Agent | Continue Support | Auto-Permissions |
 |-------|-----------------|------------------|
@@ -21,49 +59,9 @@ This tool operates in two modes:
 | Cursor | - | - |
 | Aider | Auto (chat history) | `--yes` |
 
-### Architecture
-
-```
-Terminal
-  └── aegis-mcp <agent> (wrapper)     <-- monitors for restart signals
-        └── <agent> [args...]         <-- spawned directly, can be restarted
-              └── MCP servers
-                    └── aegis-mcp --mcp-server  <-- signals wrapper
-```
-
-## Installation
-
-```bash
-# From source
-git clone https://github.com/Brainwires/aegis-mcp.git
-cd aegis-mcp
-cargo install --path .
-```
-
 ## Usage
 
-### Step 1: Configure MCP Server
-
-Add to your agent's MCP configuration (e.g., `~/.claude.json` for Claude):
-
-```json
-{
-  "mcpServers": {
-    "aegis-mcp": {
-      "type": "stdio",
-      "command": "aegis-mcp",
-      "args": ["--mcp-server"],
-      "env": {
-        "RUST_LOG": "info"
-      }
-    }
-  }
-}
-```
-
-### Step 2: Start Your Agent via the Wrapper
-
-Instead of running your agent directly, use aegis-mcp:
+### Basic Usage
 
 ```bash
 # Claude Code
@@ -79,78 +77,235 @@ aegis-mcp aider --model gpt-4
 aegis-mcp cursor
 ```
 
-**Tip:** Create a shell alias for convenience:
+### With Network Monitoring
+
 ```bash
-alias claude='aegis-mcp claude'
+# LD_PRELOAD mode (works as normal user)
+aegis-mcp claude --netmon
+
+# Network namespace mode (requires root, better isolation)
+sudo aegis-mcp claude --netmon=netns
 ```
 
-**Note:** The wrapper automatically adds permission-skipping flags if the agent supports them.
+### Options
 
-### Step 3: Use the Restart Tool
+| Option | Description |
+|--------|-------------|
+| `--netmon` | Enable network monitoring (LD_PRELOAD mode) |
+| `--netmon=preload` | Force LD_PRELOAD mode |
+| `--netmon=netns` | Force network namespace mode (requires root) |
+| `--no-inject-mcp` | Don't auto-inject aegis-mcp as an MCP server |
+| `--keep-root` | Stay root instead of dropping privileges |
 
-Once your agent is running through the wrapper, you can use the `restart_claude` tool:
+### Privilege Handling
+
+When run with sudo, aegis-mcp drops privileges before spawning the agent:
+
+```bash
+sudo aegis-mcp claude              # Sets up netns, then drops to original user
+sudo aegis-mcp claude --keep-root  # Stays root (for debugging only)
+```
+
+## MCP Tools (13 total)
+
+### Hot-Reload Tools
+
+#### restart_claude
+
+Restart the AI coding agent to reconnect all MCP servers.
 
 ```
-> Please restart to pick up my MCP server changes
+Parameters:
+- reason (optional): Reason for the restart (for logging)
+- prompt (optional): A prompt to pass as a command-line argument on restart
 
-[Calls restart_claude tool]
-
-Restart signal sent! Agent will restart momentarily.
+Example:
+restart_claude(reason: "MCP server updated", prompt: "Continue where we left off")
 ```
+
+#### server_status
+
+Get status information about the wrapper, agent process, and configuration.
+
+### Agent Pool Tools
+
+Spawn and manage background agents that work autonomously on tasks.
+
+#### agent_spawn
+
+Spawn a background agent to work on a task.
+
+```
+Parameters:
+- description: The task for the agent to work on
+- agent_type (optional): "claude", "aider", or "cursor" (default: "claude")
+- working_directory (optional): Directory for the agent to work in
+- max_iterations (optional): Maximum iterations before stopping
+
+Returns: agent_id
+```
+
+#### agent_list
+
+List all active background agents with their status.
+
+#### agent_status
+
+Get detailed status of a specific agent.
+
+```
+Parameters:
+- agent_id: The ID of the agent to check
+```
+
+#### agent_await
+
+Wait for a background agent to complete and get its result.
+
+```
+Parameters:
+- agent_id: The ID of the agent to wait for
+- timeout_secs (optional): Maximum time to wait
+```
+
+#### agent_stop
+
+Stop a running background agent.
+
+```
+Parameters:
+- agent_id: The ID of the agent to stop
+```
+
+#### agent_pool_stats
+
+Get statistics about the agent pool (max agents, active, running, completed, failed).
+
+#### agent_file_locks
+
+List all currently held file locks by agents (for coordination).
+
+### Network Monitoring Tools
+
+Monitor all network connections made by the wrapped agent.
+
+#### netmon_status
+
+Get network monitoring status and statistics including:
+- Total connections
+- Unique addresses
+- Bytes sent/received
+- Top connection targets
+
+#### netmon_log
+
+Get recent network events from the monitoring log.
+
+```
+Parameters:
+- count (optional): Number of recent events to return (default: 20)
+```
+
+#### netmon_namespace_list
+
+List all aegis network namespaces (for `--netmon=netns` mode).
+
+#### netmon_namespace_cleanup
+
+Clean up stale network namespaces after crashes. Requires root.
 
 ## How It Works
 
-1. User starts agent via `aegis-mcp <agent> [args...]`
-2. Wrapper spawns the agent as a direct child process
-3. Agent connects to MCP servers, including `aegis-mcp --mcp-server`
-4. When `restart_claude` tool is called:
-   - MCP server writes a signal file to `/tmp/aegis-mcp-{wrapper-pid}`
-   - Wrapper detects the signal file (polling every 100ms)
-   - Wrapper sends SIGINT to agent, waits for graceful exit
-   - Wrapper restarts agent with continue flag (if supported)
-   - Terminal is preserved because the wrapper never exits
+### Hot-Reload
 
-## Tools
+1. User starts agent via `aegis-mcp claude`
+2. Wrapper spawns agent with LD_PRELOAD hooks
+3. Hooks intercept `.mcp.json` reads, redirecting to overlay file
+4. Agent loads aegis-mcp as an MCP server
+5. When `restart_claude` is called:
+   - MCP server writes signal file to `/tmp/aegis-mcp-{pid}`
+   - Wrapper detects signal, sends SIGINT → SIGTERM → SIGKILL
+   - Agent restarts with `--continue` flag
+   - Session context is preserved
 
-### restart_claude
+### Network Monitoring (LD_PRELOAD)
 
-Signals the wrapper to restart the AI coding agent.
+The `libaegis_hooks.so` library intercepts:
+- `connect()` - Log connection attempts
+- `send()`/`sendto()` - Log bytes sent
+- `recv()`/`recvfrom()` - Log bytes received
+- `close()` - Log connection closes
 
-**Parameters:**
-- `reason` (optional, string): Reason for the restart (for logging)
-- `prompt` (optional, string): A prompt to pass as a command-line argument on restart
+All events are logged to `/tmp/aegis-netmon-{pid}.jsonl` in JSONL format.
 
-**Example with prompt:**
+### Network Monitoring (Namespace)
+
+When using `--netmon=netns`:
+1. Creates isolated network namespace `aegis-{pid}`
+2. Sets up veth pair for connectivity
+3. Configures NAT for internet access
+4. Agent runs inside the namespace
+5. All traffic is isolated and can be captured
+
+### Process-Isolated MCP Injection
+
+Instead of modifying `.mcp.json` on disk (which would affect all processes), aegis-mcp uses LD_PRELOAD filesystem interception:
+
+1. Creates temp overlay file `/tmp/aegis-mcp-overlay-{pid}.json`
+2. Sets `LD_PRELOAD=libaegis_hooks.so`
+3. Hooks intercept `open()`/`openat()` calls
+4. Reads of `.mcp.json` are redirected to the overlay
+5. Only the wrapped process sees the injected MCP server
+
+Benefits:
+- No file modifications
+- Multiple aegis-mcp instances work independently
+- Automatic cleanup on exit
+
+## Building
+
+```bash
+# Build everything
+cargo build --release
+cargo build -p aegis-hooks --release
+
+# Install binaries
+cp target/release/aegis-mcp ~/.local/bin/
+cp target/release/libaegis_hooks.so ~/.local/lib/
 ```
-restart_claude(reason: "MCP server updated", prompt: "Continue where we left off - the MCP servers have been reloaded.")
+
+The hooks library should be placed either:
+- Next to the `aegis-mcp` binary
+- In `./target/release/` (for development)
+- In `/usr/local/lib/` or `/usr/lib/`
+
+## Configuration
+
+### Manual MCP Configuration
+
+If you prefer to configure MCP manually instead of auto-injection:
+
+```json
+{
+  "mcpServers": {
+    "aegis-mcp": {
+      "command": "aegis-mcp",
+      "args": ["--mcp-server"]
+    }
+  }
+}
 ```
 
-### server_status
+### Shell Alias
 
-Shows status information about the wrapper and agent process.
-
-**Response includes:**
-- `mcp_server_pid`: This MCP server's process ID
-- `wrapper_pid`: The wrapper's process ID (if running through wrapper)
-- `wrapper_running`: Whether the wrapper is active
-- `claude_code_pid`: The agent's process ID
-- `working_directory`: Current working directory
-
-## Features
-
-- **Multi-agent support** - Works with Claude, Cursor, Aider, and more
-- **Minimal overhead** - Simple process supervision without terminal interference
-- **Direct spawning** - Agent runs as a regular child process, no PTY complexity
-- **Auto-permissions** - Automatically adds permission flags per agent
-- **Session continuation** - Restart uses continue flags when supported
-- **Prompt passing** - Optionally pass a prompt on restart
-- **Simple signaling** - File-based IPC, no complex sockets or daemons
-- **Graceful shutdown** - SIGINT (3s) → SIGTERM (2s) → SIGKILL sequence
-- **Zero terminal interference** - No emulation layer that could break the agent's display
+```bash
+alias claude='aegis-mcp claude'
+alias claude-monitor='aegis-mcp claude --netmon'
+```
 
 ## Platform Support
 
-Currently Linux only (uses `/proc` filesystem).
+Linux only (uses `/proc` filesystem, LD_PRELOAD, and network namespaces).
 
 ## License
 

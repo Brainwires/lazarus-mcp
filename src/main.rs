@@ -1,4 +1,5 @@
 mod mcp_server;
+mod netmon;
 mod pool;
 mod privileges;
 mod restart;
@@ -19,11 +20,16 @@ fn print_usage() {
     eprintln!("  cursor    Cursor editor");
     eprintln!("  aider     Aider CLI\n");
     eprintln!("OPTIONS:");
-    eprintln!("  --keep-root    Stay root instead of dropping privileges (when run with sudo)\n");
+    eprintln!("  --keep-root          Stay root instead of dropping privileges (when run with sudo)");
+    eprintln!("  --no-inject-mcp      Don't auto-inject aegis-mcp as an MCP server");
+    eprintln!("  --netmon             Enable network monitoring (auto-detect mode)");
+    eprintln!("  --netmon=preload     Force LD_PRELOAD mode for network monitoring");
+    eprintln!("  --netmon=netns       Force network namespace mode (requires root)\n");
     eprintln!("EXAMPLES:");
     eprintln!("  aegis-mcp claude --continue");
     eprintln!("  aegis-mcp claude -p \"Help me with...\"");
     eprintln!("  aegis-mcp aider --model gpt-4");
+    eprintln!("  aegis-mcp claude --netmon          # Monitor network with LD_PRELOAD");
     eprintln!("  sudo aegis-mcp claude              # Drops to original user before spawning");
     eprintln!("  sudo aegis-mcp claude --keep-root  # Stays root (advanced/debugging)");
 }
@@ -74,13 +80,31 @@ fn main() -> Result<()> {
         // Parse aegis-mcp specific options and collect agent args
         let remaining_args: Vec<String> = args.into_iter().skip(2).collect();
         let keep_root = remaining_args.iter().any(|a| a == "--keep-root");
+        let inject_mcp = !remaining_args.iter().any(|a| a == "--no-inject-mcp");
+
+        // Parse --netmon option
+        let netmon_mode = remaining_args
+            .iter()
+            .find(|a| a.starts_with("--netmon"))
+            .map(|a| {
+                if a == "--netmon" {
+                    netmon::NetmonMode::Preload // Default to preload
+                } else if a == "--netmon=preload" {
+                    netmon::NetmonMode::Preload
+                } else if a == "--netmon=netns" {
+                    netmon::NetmonMode::Namespace
+                } else {
+                    eprintln!("Unknown netmon mode: {}. Using preload.", a);
+                    netmon::NetmonMode::Preload
+                }
+            });
 
         // Filter out aegis-mcp options, pass remaining to agent
         let agent_args: Vec<String> = remaining_args
             .into_iter()
-            .filter(|a| a != "--keep-root")
+            .filter(|a| a != "--keep-root" && a != "--no-inject-mcp" && !a.starts_with("--netmon"))
             .collect();
 
-        wrapper::run(agent, agent_args, keep_root)
+        wrapper::run(agent, agent_args, keep_root, netmon_mode, inject_mcp)
     }
 }

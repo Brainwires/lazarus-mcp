@@ -2,19 +2,28 @@ use anyhow::{Context, Result};
 use nix::sys::signal::{self, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::Pid;
-use serde_json;
+use serde_json::{self, json};
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 
+use crate::netmon::NetmonMode;
 use crate::privileges;
 
 const SIGNAL_FILE_PREFIX: &str = "/tmp/aegis-mcp-";
+
+/// Environment variable for MCP overlay file path
+const MCP_OVERLAY_ENV: &str = "AEGIS_MCP_OVERLAY";
+/// Environment variable for target file to overlay
+const MCP_TARGET_ENV: &str = "AEGIS_MCP_TARGET";
+/// Default target file for MCP overlay
+const MCP_TARGET_FILE: &str = ".mcp.json";
 
 /// Agent-specific configuration
 struct AgentConfig {
@@ -151,6 +160,70 @@ struct ParsedRestartSignal {
     prompt: Option<String>,
 }
 
+/// Get the MCP overlay file path for this process
+fn mcp_overlay_path() -> PathBuf {
+    PathBuf::from(format!("/tmp/aegis-mcp-overlay-{}.json", process::id()))
+}
+
+/// Create the MCP server configuration JSON for the overlay
+/// Reads the existing .mcp.json and merges aegis-mcp into it
+fn create_mcp_config() -> Result<String> {
+    let aegis_path = std::env::current_exe()
+        .context("Failed to get current executable path")?;
+
+    // Read existing .mcp.json if it exists
+    let mut config: serde_json::Value = if Path::new(MCP_TARGET_FILE).exists() {
+        let content = fs::read_to_string(MCP_TARGET_FILE)
+            .context("Failed to read existing .mcp.json")?;
+        serde_json::from_str(&content)
+            .context("Failed to parse existing .mcp.json")?
+    } else {
+        // No existing file, create empty structure
+        json!({ "mcpServers": {} })
+    };
+
+    // Ensure mcpServers object exists
+    if config.get("mcpServers").is_none() {
+        config["mcpServers"] = json!({});
+    }
+
+    // Inject aegis-mcp server (schema-compliant, no extra fields)
+    config["mcpServers"]["aegis-mcp"] = json!({
+        "command": aegis_path.to_string_lossy(),
+        "args": ["--mcp-server"]
+    });
+
+    Ok(serde_json::to_string_pretty(&config)?)
+}
+
+/// Find the hooks library (libaegis_hooks.so)
+fn find_hooks_library() -> Result<PathBuf> {
+    let candidates = [
+        // Next to the aegis-mcp binary
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("libaegis_hooks.so"))),
+        // In the same directory as the binary
+        Some(PathBuf::from("./libaegis_hooks.so")),
+        // System lib directories
+        Some(PathBuf::from("/usr/local/lib/libaegis_hooks.so")),
+        Some(PathBuf::from("/usr/lib/libaegis_hooks.so")),
+        // Development location (relative to cwd)
+        Some(PathBuf::from("./target/release/libaegis_hooks.so")),
+        Some(PathBuf::from("./target/debug/libaegis_hooks.so")),
+    ];
+
+    for candidate in candidates.into_iter().flatten() {
+        if candidate.exists() {
+            return Ok(candidate.canonicalize().unwrap_or(candidate));
+        }
+    }
+
+    anyhow::bail!(
+        "Could not find libaegis_hooks.so. Build it with: cargo build -p aegis-hooks --release"
+    )
+}
+
 /// Check if there's a restart signal and parse it
 fn check_restart_signal() -> Option<ParsedRestartSignal> {
     let path = signal_file_path();
@@ -182,7 +255,7 @@ fn check_restart_signal() -> Option<ParsedRestartSignal> {
 }
 
 /// Run the wrapper
-pub fn run(agent_name: String, agent_args: Vec<String>, keep_root: bool) -> Result<()> {
+pub fn run(agent_name: String, agent_args: Vec<String>, keep_root: bool, netmon_mode: Option<NetmonMode>, inject_mcp: bool) -> Result<()> {
     let agent = find_agent(&agent_name)?;
     info!("Found {} at: {:?}", agent.name, agent.path);
     info!("Wrapper PID: {}", process::id());
@@ -196,6 +269,48 @@ pub fn run(agent_name: String, agent_args: Vec<String>, keep_root: bool) -> Resu
             privileges::drop_privileges()?;
         }
     }
+
+    // Create MCP overlay file for process-isolated injection
+    let mcp_overlay_file = if inject_mcp {
+        match create_mcp_config() {
+            Ok(config) => {
+                let overlay_path = mcp_overlay_path();
+                match fs::write(&overlay_path, &config) {
+                    Ok(()) => {
+                        info!("Created MCP overlay at: {}", overlay_path.display());
+                        Some(overlay_path)
+                    }
+                    Err(e) => {
+                        warn!("Failed to write MCP overlay: {}. Continuing without injection.", e);
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                warn!("Failed to create MCP config: {}. Continuing without injection.", e);
+                None
+            }
+        }
+    } else {
+        info!("MCP auto-injection disabled");
+        None
+    };
+
+    // Find hooks library if MCP injection or netmon is enabled
+    let hooks_library = if mcp_overlay_file.is_some() || netmon_mode.is_some() {
+        match find_hooks_library() {
+            Ok(path) => {
+                info!("Found hooks library: {}", path.display());
+                Some(path)
+            }
+            Err(e) => {
+                warn!("{}. Hooks-based features will be disabled.", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     // Clean up any stale signal file
     let _ = fs::remove_file(signal_file_path());
@@ -240,8 +355,22 @@ pub fn run(agent_name: String, agent_args: Vec<String>, keep_root: bool) -> Resu
 
         info!("Starting {} with args: {:?}", agent.name, args);
 
+        // Build environment variables for the agent
+        let mut extra_env: HashMap<String, String> = HashMap::new();
+
+        // Add LD_PRELOAD for hooks library (filesystem overlay for MCP injection)
+        if let Some(ref lib_path) = hooks_library {
+            extra_env.insert("LD_PRELOAD".to_string(), lib_path.to_string_lossy().to_string());
+        }
+
+        // Add MCP overlay environment variables
+        if let Some(ref overlay_path) = mcp_overlay_file {
+            extra_env.insert(MCP_OVERLAY_ENV.to_string(), overlay_path.to_string_lossy().to_string());
+            extra_env.insert(MCP_TARGET_ENV.to_string(), MCP_TARGET_FILE.to_string());
+        }
+
         // Spawn agent directly without any PTY or terminal emulation
-        let exit_reason = run_agent(&agent.path, &args, running.clone())?;
+        let exit_reason = run_agent(&agent.path, &args, &extra_env, running.clone())?;
 
         match exit_reason {
             ExitReason::RestartRequested { reason, prompt } => {
@@ -276,6 +405,12 @@ pub fn run(agent_name: String, agent_args: Vec<String>, keep_root: bool) -> Resu
     // Clean up signal file
     let _ = fs::remove_file(signal_file_path());
 
+    // Clean up MCP overlay file
+    if let Some(ref overlay_path) = mcp_overlay_file {
+        let _ = fs::remove_file(overlay_path);
+        info!("Cleaned up MCP overlay file");
+    }
+
     Ok(())
 }
 
@@ -291,13 +426,20 @@ enum ExitReason {
 fn run_agent(
     agent_path: &PathBuf,
     args: &[String],
+    extra_env: &HashMap<String, String>,
     running: Arc<AtomicBool>,
 ) -> Result<ExitReason> {
+    // Build command with environment variables
+    let mut cmd = Command::new(agent_path);
+    cmd.args(args);
+
+    // Add extra environment variables (e.g., LD_PRELOAD for MCP injection)
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
+
     // Spawn agent directly - no PTY, no terminal emulation
-    let mut child = Command::new(agent_path)
-        .args(args)
-        .spawn()
-        .context("Failed to spawn agent")?;
+    let mut child = cmd.spawn().context("Failed to spawn agent")?;
 
     let child_pid = Pid::from_raw(child.id() as i32);
 
