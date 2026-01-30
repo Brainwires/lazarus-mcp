@@ -290,6 +290,62 @@ fn handle_tools_list() -> Value {
                     "type": "object",
                     "properties": {}
                 }
+            },
+            // Watchdog tools
+            {
+                "name": "watchdog_status",
+                "description": "Get watchdog health monitoring status. Shows process state, uptime, last activity time, memory/CPU usage, and whether any action is pending.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "watchdog_configure",
+                "description": "Configure watchdog settings. Changes take effect immediately.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "enabled": {
+                            "type": "boolean",
+                            "description": "Enable or disable watchdog monitoring"
+                        },
+                        "heartbeat_timeout_secs": {
+                            "type": "integer",
+                            "description": "Seconds without activity before considering process unresponsive (default: 60)"
+                        },
+                        "lockup_action": {
+                            "type": "string",
+                            "enum": ["warn", "restart", "restart_with_backoff", "kill", "notify_and_wait"],
+                            "description": "Action to take when process is unresponsive (default: restart)"
+                        },
+                        "max_memory_mb": {
+                            "type": "integer",
+                            "description": "Maximum memory usage in MB before triggering action (optional)"
+                        }
+                    }
+                }
+            },
+            {
+                "name": "watchdog_disable",
+                "description": "Temporarily disable watchdog for a specified duration. Useful during long-running operations that may appear unresponsive.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "duration_secs": {
+                            "type": "integer",
+                            "description": "Number of seconds to disable watchdog (default: 300 = 5 minutes)"
+                        }
+                    }
+                }
+            },
+            {
+                "name": "watchdog_ping",
+                "description": "Send a heartbeat to the watchdog. Use this if your agent is doing work that doesn't generate normal activity (stdout/stderr).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
             }
         ]
     })
@@ -329,6 +385,11 @@ async fn handle_tools_call(params: Option<&Value>) -> Value {
         "netmon_log" => handle_netmon_log(arguments),
         "netmon_namespace_list" => handle_netmon_namespace_list(),
         "netmon_namespace_cleanup" => handle_netmon_namespace_cleanup(),
+        // Watchdog tools
+        "watchdog_status" => handle_watchdog_status(),
+        "watchdog_configure" => handle_watchdog_configure(arguments),
+        "watchdog_disable" => handle_watchdog_disable(arguments),
+        "watchdog_ping" => handle_watchdog_ping(),
         _ => json!({
             "content": [{
                 "type": "text",
@@ -884,4 +945,255 @@ fn find_wrapper_pid() -> Option<u32> {
     }
 
     None
+}
+
+// Watchdog tool handlers
+
+/// Signal file paths for watchdog IPC
+const WATCHDOG_PING_PREFIX: &str = "/tmp/aegis-watchdog-ping-";
+const WATCHDOG_CONFIG_PREFIX: &str = "/tmp/aegis-watchdog-config-";
+const SHARED_STATE_PREFIX: &str = "/tmp/aegis-mcp-state-";
+
+fn handle_watchdog_status() -> Value {
+    // Read the shared state file from the wrapper
+    let wrapper_pid = match find_wrapper_pid() {
+        Some(pid) => pid,
+        None => {
+            return json!({
+                "content": [{
+                    "type": "text",
+                    "text": "Watchdog status unavailable: Could not find aegis-mcp wrapper process.\n\nMake sure you started your agent via the aegis-mcp wrapper:\n  aegis-mcp <agent> [args...]"
+                }],
+                "isError": true
+            });
+        }
+    };
+
+    let state_path = format!("{}{}", SHARED_STATE_PREFIX, wrapper_pid);
+
+    match std::fs::read_to_string(&state_path) {
+        Ok(content) => {
+            match serde_json::from_str::<serde_json::Value>(&content) {
+                Ok(state) => {
+                    let mut output = String::new();
+                    output.push_str("Watchdog Status\n");
+                    output.push_str("===============\n\n");
+
+                    if let Some(health) = state.get("health") {
+                        if let Some(state_val) = health.get("state").and_then(|s| s.as_str()) {
+                            let icon = match state_val {
+                                "active" => "🟢",
+                                "idle" => "🟡",
+                                "unresponsive" => "🔴",
+                                "high_resource" => "🟠",
+                                _ => "⚪",
+                            };
+                            output.push_str(&format!("State: {} {}\n", icon, state_val));
+                        }
+                        if let Some(uptime) = health.get("uptime_secs").and_then(|u| u.as_u64()) {
+                            let mins = uptime / 60;
+                            let secs = uptime % 60;
+                            output.push_str(&format!("Uptime: {}m {}s\n", mins, secs));
+                        }
+                        if let Some(last_activity) = health.get("last_activity_secs").and_then(|l| l.as_u64()) {
+                            output.push_str(&format!("Last activity: {}s ago\n", last_activity));
+                        }
+                        if let Some(mem) = health.get("memory_mb").and_then(|m| m.as_u64()) {
+                            output.push_str(&format!("Memory: {} MB\n", mem));
+                        }
+                        if let Some(cpu) = health.get("cpu_percent").and_then(|c| c.as_f64()) {
+                            output.push_str(&format!("CPU: {:.1}%\n", cpu));
+                        }
+                        if let Some(count) = health.get("unresponsive_count").and_then(|c| c.as_u64()) {
+                            if count > 0 {
+                                output.push_str(&format!("Unresponsive count: {}\n", count));
+                            }
+                        }
+                        if let Some(action) = health.get("action_pending").and_then(|a| a.as_str()) {
+                            output.push_str(&format!("\n⚠️ Action pending: {}\n", action));
+                        }
+                    } else {
+                        output.push_str("No health data available yet.\n");
+                    }
+
+                    output.push_str(&format!("\nWrapper PID: {}\n", wrapper_pid));
+                    if let Some(agent_pid) = state.get("agent_pid").and_then(|p| p.as_u64()) {
+                        output.push_str(&format!("Agent PID: {}\n", agent_pid));
+                    }
+                    if let Some(restarts) = state.get("restart_count").and_then(|r| r.as_u64()) {
+                        output.push_str(&format!("Restart count: {}\n", restarts));
+                    }
+
+                    json!({
+                        "content": [{
+                            "type": "text",
+                            "text": output
+                        }],
+                        "isError": false
+                    })
+                }
+                Err(e) => json!({
+                    "content": [{
+                        "type": "text",
+                        "text": format!("Error parsing watchdog state: {}", e)
+                    }],
+                    "isError": true
+                }),
+            }
+        }
+        Err(_) => json!({
+            "content": [{
+                "type": "text",
+                "text": "Watchdog status unavailable: State file not found.\n\nThe wrapper may still be starting up, or watchdog state saving may not be active."
+            }],
+            "isError": false
+        }),
+    }
+}
+
+fn handle_watchdog_configure(arguments: Option<&Value>) -> Value {
+    let wrapper_pid = match find_wrapper_pid() {
+        Some(pid) => pid,
+        None => {
+            return json!({
+                "content": [{
+                    "type": "text",
+                    "text": "Cannot configure watchdog: Could not find aegis-mcp wrapper process."
+                }],
+                "isError": true
+            });
+        }
+    };
+
+    // Build configuration from arguments
+    let mut config = serde_json::Map::new();
+
+    if let Some(args) = arguments {
+        if let Some(enabled) = args.get("enabled").and_then(|e| e.as_bool()) {
+            config.insert("enabled".to_string(), json!(enabled));
+        }
+        if let Some(timeout) = args.get("heartbeat_timeout_secs").and_then(|t| t.as_u64()) {
+            config.insert("heartbeat_timeout".to_string(), json!(timeout));
+        }
+        if let Some(action) = args.get("lockup_action").and_then(|a| a.as_str()) {
+            config.insert("lockup_action".to_string(), json!(action));
+        }
+        if let Some(max_mem) = args.get("max_memory_mb").and_then(|m| m.as_u64()) {
+            config.insert("max_memory_mb".to_string(), json!(max_mem));
+        }
+    }
+
+    if config.is_empty() {
+        return json!({
+            "content": [{
+                "type": "text",
+                "text": "No configuration options provided.\n\nAvailable options:\n- enabled: true/false\n- heartbeat_timeout_secs: number\n- lockup_action: warn/restart/restart_with_backoff/kill/notify_and_wait\n- max_memory_mb: number"
+            }],
+            "isError": false
+        });
+    }
+
+    // Write config signal file
+    let config_path = format!("{}{}", WATCHDOG_CONFIG_PREFIX, wrapper_pid);
+    let config_json = serde_json::to_string(&config).unwrap_or_default();
+
+    match std::fs::write(&config_path, &config_json) {
+        Ok(()) => json!({
+            "content": [{
+                "type": "text",
+                "text": format!("Watchdog configuration updated:\n{}", serde_json::to_string_pretty(&config).unwrap_or_default())
+            }],
+            "isError": false
+        }),
+        Err(e) => json!({
+            "content": [{
+                "type": "text",
+                "text": format!("Error writing watchdog config: {}", e)
+            }],
+            "isError": true
+        }),
+    }
+}
+
+fn handle_watchdog_disable(arguments: Option<&Value>) -> Value {
+    let wrapper_pid = match find_wrapper_pid() {
+        Some(pid) => pid,
+        None => {
+            return json!({
+                "content": [{
+                    "type": "text",
+                    "text": "Cannot disable watchdog: Could not find aegis-mcp wrapper process."
+                }],
+                "isError": true
+            });
+        }
+    };
+
+    let duration_secs = arguments
+        .and_then(|a| a.get("duration_secs"))
+        .and_then(|d| d.as_u64())
+        .unwrap_or(300); // Default 5 minutes
+
+    // Write config signal to disable temporarily
+    let config = json!({
+        "disable_for_secs": duration_secs
+    });
+
+    let config_path = format!("{}{}", WATCHDOG_CONFIG_PREFIX, wrapper_pid);
+
+    match std::fs::write(&config_path, serde_json::to_string(&config).unwrap_or_default()) {
+        Ok(()) => {
+            let mins = duration_secs / 60;
+            let secs = duration_secs % 60;
+            json!({
+                "content": [{
+                    "type": "text",
+                    "text": format!("Watchdog disabled for {}m {}s.\n\nThe watchdog will automatically re-enable after this period.", mins, secs)
+                }],
+                "isError": false
+            })
+        }
+        Err(e) => json!({
+            "content": [{
+                "type": "text",
+                "text": format!("Error disabling watchdog: {}", e)
+            }],
+            "isError": true
+        }),
+    }
+}
+
+fn handle_watchdog_ping() -> Value {
+    let wrapper_pid = match find_wrapper_pid() {
+        Some(pid) => pid,
+        None => {
+            return json!({
+                "content": [{
+                    "type": "text",
+                    "text": "Cannot ping watchdog: Could not find aegis-mcp wrapper process."
+                }],
+                "isError": true
+            });
+        }
+    };
+
+    // Create ping signal file
+    let ping_path = format!("{}{}", WATCHDOG_PING_PREFIX, wrapper_pid);
+
+    match std::fs::write(&ping_path, "ping") {
+        Ok(()) => json!({
+            "content": [{
+                "type": "text",
+                "text": "Watchdog ping sent. Activity timestamp updated."
+            }],
+            "isError": false
+        }),
+        Err(e) => json!({
+            "content": [{
+                "type": "text",
+                "text": format!("Error sending watchdog ping: {}", e)
+            }],
+            "isError": true
+        }),
+    }
 }

@@ -21,6 +21,7 @@ anyhow = "1"
 which = "7"
 dirs = "6"
 ctrlc = "3"
+humantime = "2"
 
 # Async runtime for agent pool
 tokio = { version = "1", features = ["full"] }
@@ -28,9 +29,19 @@ tokio = { version = "1", features = ["full"] }
 # UUID for agent IDs
 uuid = { version = "1", features = ["v4"] }
 
+# Process monitoring
+sysinfo = "0.38"
+
+# TUI
+ratatui = "0.30"
+ratatui-interact = "0.3"
+crossterm = "0.29"
+tui-input = "0.15"
+
 # Unix process control
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["process", "signal", "user"] }
+libc = "0.2"
 
 [profile.release]
 lto = true
@@ -38,6 +49,9 @@ strip = true
 
 [workspace]
 members = ["hooks"]
+
+[build-dependencies]
+chrono = "0.4"
 
 [dev-dependencies]
 tempfile = "3.24.0"

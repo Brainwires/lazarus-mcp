@@ -11,10 +11,57 @@
 //!     AEGIS_MCP_TARGET=.mcp.json \
 //!     <command>
 
+// ============================================================================
+// Version Information
+// ============================================================================
+
+/// Library version from Cargo.toml
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Build timestamp (set by build.rs)
+pub const BUILD_TIME: &str = env!("AEGIS_HOOKS_BUILD_TIME");
+
+/// Git commit hash (set by build.rs)
+pub const GIT_HASH: &str = env!("AEGIS_HOOKS_GIT_HASH");
+
+/// Combined version string for display
+pub const VERSION_STRING: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (built ",
+    env!("AEGIS_HOOKS_BUILD_TIME"),
+    ", git ",
+    env!("AEGIS_HOOKS_GIT_HASH"),
+    ")"
+);
+
+/// Export version info as a C-compatible function for external verification
+#[no_mangle]
+pub extern "C" fn aegis_hooks_version() -> *const std::ffi::c_char {
+    static VERSION_CSTR: once_cell::sync::Lazy<std::ffi::CString> =
+        once_cell::sync::Lazy::new(|| {
+            std::ffi::CString::new(VERSION_STRING).unwrap_or_else(|_| {
+                std::ffi::CString::new("unknown").unwrap()
+            })
+        });
+    VERSION_CSTR.as_ptr()
+}
+
+/// Export build timestamp as a C-compatible function
+#[no_mangle]
+pub extern "C" fn aegis_hooks_build_time() -> *const std::ffi::c_char {
+    static BUILD_TIME_CSTR: once_cell::sync::Lazy<std::ffi::CString> =
+        once_cell::sync::Lazy::new(|| {
+            std::ffi::CString::new(BUILD_TIME).unwrap_or_else(|_| {
+                std::ffi::CString::new("unknown").unwrap()
+            })
+        });
+    BUILD_TIME_CSTR.as_ptr()
+}
+
 /// Library initialization - runs when LD_PRELOAD loads the library
 #[ctor::ctor]
 fn init() {
-    eprintln!("[aegis-hooks] Library loaded");
+    eprintln!("[aegis-hooks] Library loaded v{}", VERSION_STRING);
     if let Ok(overlay) = std::env::var("AEGIS_MCP_OVERLAY") {
         eprintln!("[aegis-hooks] MCP overlay: {}", overlay);
     }
@@ -434,24 +481,9 @@ pub unsafe extern "C" fn close(fd: c_int) -> c_int {
 /// Redirects reads of the MCP target file to the overlay file
 #[no_mangle]
 pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: mode_t) -> c_int {
-    // Debug: always log first few calls
-    static CALL_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let count = CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if count < 5 {
-        if !path.is_null() {
-            let p = CStr::from_ptr(path).to_string_lossy();
-            eprintln!("[aegis-hooks] open() called: {}", p);
-        }
-    }
-
     // Check if this is our overlay target
     if !path.is_null() {
         let path_str = CStr::from_ptr(path).to_string_lossy();
-
-        // Debug: log .mcp.json accesses
-        if path_str.contains(".mcp.json") || path_str.contains("mcp.json") {
-            eprintln!("[aegis-hooks] open(): {}", path_str);
-        }
 
         if should_overlay(&path_str) {
             // Redirect to overlay file
@@ -484,11 +516,6 @@ pub unsafe extern "C" fn open64(path: *const c_char, flags: c_int, mode: mode_t)
     // Check if this is our overlay target
     if !path.is_null() {
         let path_str = CStr::from_ptr(path).to_string_lossy();
-
-        // Debug: log .mcp.json accesses
-        if path_str.contains(".mcp.json") || path_str.contains("mcp.json") {
-            eprintln!("[aegis-hooks] open64(): {}", path_str);
-        }
 
         if should_overlay(&path_str) {
             // Redirect to overlay file
@@ -524,24 +551,9 @@ pub unsafe extern "C" fn openat(
     flags: c_int,
     mode: mode_t,
 ) -> c_int {
-    // Debug: always log first few calls
-    static CALL_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let count = CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if count < 5 {
-        if !path.is_null() {
-            let p = CStr::from_ptr(path).to_string_lossy();
-            eprintln!("[aegis-hooks] openat() called: {}", p);
-        }
-    }
-
     // Check if this is our overlay target
     if !path.is_null() {
         let path_str = CStr::from_ptr(path).to_string_lossy();
-
-        // Debug: log .mcp.json accesses
-        if path_str.contains(".mcp.json") || path_str.contains("mcp.json") {
-            eprintln!("[aegis-hooks] openat(): {}", path_str);
-        }
 
         if should_overlay(&path_str) {
             // Redirect to overlay file (use AT_FDCWD to ignore dirfd)
@@ -579,7 +591,6 @@ pub unsafe extern "C" fn stat(path: *const c_char, buf: *mut libc::stat) -> c_in
         let path_str = CStr::from_ptr(path).to_string_lossy();
         if should_overlay(&path_str) {
             if let Some(overlay_cstr) = get_overlay_cstr() {
-                eprintln!("[aegis-hooks] stat({}) -> overlay", path_str);
                 return match *REAL_STAT {
                     Some(f) => f(overlay_cstr.as_ptr(), buf),
                     None => { *libc::__errno_location() = libc::ENOSYS; -1 }
@@ -600,7 +611,6 @@ pub unsafe extern "C" fn stat64(path: *const c_char, buf: *mut libc::stat64) -> 
         let path_str = CStr::from_ptr(path).to_string_lossy();
         if should_overlay(&path_str) {
             if let Some(overlay_cstr) = get_overlay_cstr() {
-                eprintln!("[aegis-hooks] stat64({}) -> overlay", path_str);
                 return match *REAL_STAT64 {
                     Some(f) => f(overlay_cstr.as_ptr(), buf),
                     None => { *libc::__errno_location() = libc::ENOSYS; -1 }
@@ -661,7 +671,6 @@ pub unsafe extern "C" fn access(path: *const c_char, mode: c_int) -> c_int {
         let path_str = CStr::from_ptr(path).to_string_lossy();
         if should_overlay(&path_str) {
             if let Some(overlay_cstr) = get_overlay_cstr() {
-                eprintln!("[aegis-hooks] access({}) -> overlay", path_str);
                 return match *REAL_ACCESS {
                     Some(f) => f(overlay_cstr.as_ptr(), mode),
                     None => { *libc::__errno_location() = libc::ENOSYS; -1 }
