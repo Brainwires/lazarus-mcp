@@ -11,6 +11,18 @@
 //!     AEGIS_MCP_TARGET=.mcp.json \
 //!     <command>
 
+/// Library initialization - runs when LD_PRELOAD loads the library
+#[ctor::ctor]
+fn init() {
+    eprintln!("[aegis-hooks] Library loaded");
+    if let Ok(overlay) = std::env::var("AEGIS_MCP_OVERLAY") {
+        eprintln!("[aegis-hooks] MCP overlay: {}", overlay);
+    }
+    if let Ok(target) = std::env::var("AEGIS_MCP_TARGET") {
+        eprintln!("[aegis-hooks] MCP target: {}", target);
+    }
+}
+
 use libc::{
     c_char, c_int, c_void, mode_t, size_t, sockaddr, sockaddr_in, sockaddr_in6, socklen_t,
     ssize_t, AF_INET, AF_INET6,
@@ -201,6 +213,9 @@ type CloseFn = unsafe extern "C" fn(c_int) -> c_int;
 // Filesystem functions
 type OpenFn = unsafe extern "C" fn(*const c_char, c_int, mode_t) -> c_int;
 type OpenatFn = unsafe extern "C" fn(c_int, *const c_char, c_int, mode_t) -> c_int;
+type StatFn = unsafe extern "C" fn(*const c_char, *mut libc::stat) -> c_int;
+type Stat64Fn = unsafe extern "C" fn(*const c_char, *mut libc::stat64) -> c_int;
+type AccessFn = unsafe extern "C" fn(*const c_char, c_int) -> c_int;
 
 /// Get the original libc function using dlsym
 unsafe fn get_real_fn<T>(name: &str) -> Option<T> {
@@ -230,7 +245,13 @@ static REAL_CLOSE: Lazy<Option<CloseFn>> = Lazy::new(|| unsafe { get_real_fn("cl
 
 // Filesystem
 static REAL_OPEN: Lazy<Option<OpenFn>> = Lazy::new(|| unsafe { get_real_fn("open") });
+static REAL_OPEN64: Lazy<Option<OpenFn>> = Lazy::new(|| unsafe { get_real_fn("open64") });
 static REAL_OPENAT: Lazy<Option<OpenatFn>> = Lazy::new(|| unsafe { get_real_fn("openat") });
+static REAL_STAT: Lazy<Option<StatFn>> = Lazy::new(|| unsafe { get_real_fn("stat") });
+static REAL_STAT64: Lazy<Option<Stat64Fn>> = Lazy::new(|| unsafe { get_real_fn("stat64") });
+static REAL_LSTAT: Lazy<Option<StatFn>> = Lazy::new(|| unsafe { get_real_fn("lstat") });
+static REAL_LSTAT64: Lazy<Option<Stat64Fn>> = Lazy::new(|| unsafe { get_real_fn("lstat64") });
+static REAL_ACCESS: Lazy<Option<AccessFn>> = Lazy::new(|| unsafe { get_real_fn("access") });
 
 // ============================================================================
 // Network Function Interception
@@ -413,13 +434,29 @@ pub unsafe extern "C" fn close(fd: c_int) -> c_int {
 /// Redirects reads of the MCP target file to the overlay file
 #[no_mangle]
 pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: mode_t) -> c_int {
+    // Debug: always log first few calls
+    static CALL_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let count = CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if count < 5 {
+        if !path.is_null() {
+            let p = CStr::from_ptr(path).to_string_lossy();
+            eprintln!("[aegis-hooks] open() called: {}", p);
+        }
+    }
+
     // Check if this is our overlay target
     if !path.is_null() {
         let path_str = CStr::from_ptr(path).to_string_lossy();
 
+        // Debug: log .mcp.json accesses
+        if path_str.contains(".mcp.json") || path_str.contains("mcp.json") {
+            eprintln!("[aegis-hooks] open(): {}", path_str);
+        }
+
         if should_overlay(&path_str) {
             // Redirect to overlay file
             if let Some(overlay_cstr) = get_overlay_cstr() {
+                eprintln!("[aegis-hooks] REDIRECTING {} -> overlay", path_str);
                 return match *REAL_OPEN {
                     Some(f) => f(overlay_cstr.as_ptr(), flags, mode),
                     None => {
@@ -441,6 +478,43 @@ pub unsafe extern "C" fn open(path: *const c_char, flags: c_int, mode: mode_t) -
     }
 }
 
+/// Intercepted open64() function - used by Rust and many 64-bit programs
+#[no_mangle]
+pub unsafe extern "C" fn open64(path: *const c_char, flags: c_int, mode: mode_t) -> c_int {
+    // Check if this is our overlay target
+    if !path.is_null() {
+        let path_str = CStr::from_ptr(path).to_string_lossy();
+
+        // Debug: log .mcp.json accesses
+        if path_str.contains(".mcp.json") || path_str.contains("mcp.json") {
+            eprintln!("[aegis-hooks] open64(): {}", path_str);
+        }
+
+        if should_overlay(&path_str) {
+            // Redirect to overlay file
+            if let Some(overlay_cstr) = get_overlay_cstr() {
+                eprintln!("[aegis-hooks] REDIRECTING {} -> overlay", path_str);
+                return match *REAL_OPEN64 {
+                    Some(f) => f(overlay_cstr.as_ptr(), flags, mode),
+                    None => {
+                        *libc::__errno_location() = libc::ENOSYS;
+                        -1
+                    }
+                };
+            }
+        }
+    }
+
+    // Normal open64
+    match *REAL_OPEN64 {
+        Some(f) => f(path, flags, mode),
+        None => {
+            *libc::__errno_location() = libc::ENOSYS;
+            -1
+        }
+    }
+}
+
 /// Intercepted openat() function
 /// Redirects reads of the MCP target file to the overlay file
 #[no_mangle]
@@ -450,13 +524,29 @@ pub unsafe extern "C" fn openat(
     flags: c_int,
     mode: mode_t,
 ) -> c_int {
+    // Debug: always log first few calls
+    static CALL_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let count = CALL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if count < 5 {
+        if !path.is_null() {
+            let p = CStr::from_ptr(path).to_string_lossy();
+            eprintln!("[aegis-hooks] openat() called: {}", p);
+        }
+    }
+
     // Check if this is our overlay target
     if !path.is_null() {
         let path_str = CStr::from_ptr(path).to_string_lossy();
 
+        // Debug: log .mcp.json accesses
+        if path_str.contains(".mcp.json") || path_str.contains("mcp.json") {
+            eprintln!("[aegis-hooks] openat(): {}", path_str);
+        }
+
         if should_overlay(&path_str) {
             // Redirect to overlay file (use AT_FDCWD to ignore dirfd)
             if let Some(overlay_cstr) = get_overlay_cstr() {
+                eprintln!("[aegis-hooks] REDIRECTING {} -> overlay", path_str);
                 return match *REAL_OPENAT {
                     Some(f) => f(libc::AT_FDCWD, overlay_cstr.as_ptr(), flags, mode),
                     None => {
@@ -475,6 +565,113 @@ pub unsafe extern "C" fn openat(
             *libc::__errno_location() = libc::ENOSYS;
             -1
         }
+    }
+}
+
+// ============================================================================
+// Stat/Access Interception (to make overlay file appear to exist)
+// ============================================================================
+
+/// Intercepted stat() - makes overlay target appear to exist
+#[no_mangle]
+pub unsafe extern "C" fn stat(path: *const c_char, buf: *mut libc::stat) -> c_int {
+    if !path.is_null() {
+        let path_str = CStr::from_ptr(path).to_string_lossy();
+        if should_overlay(&path_str) {
+            if let Some(overlay_cstr) = get_overlay_cstr() {
+                eprintln!("[aegis-hooks] stat({}) -> overlay", path_str);
+                return match *REAL_STAT {
+                    Some(f) => f(overlay_cstr.as_ptr(), buf),
+                    None => { *libc::__errno_location() = libc::ENOSYS; -1 }
+                };
+            }
+        }
+    }
+    match *REAL_STAT {
+        Some(f) => f(path, buf),
+        None => { *libc::__errno_location() = libc::ENOSYS; -1 }
+    }
+}
+
+/// Intercepted stat64() - makes overlay target appear to exist
+#[no_mangle]
+pub unsafe extern "C" fn stat64(path: *const c_char, buf: *mut libc::stat64) -> c_int {
+    if !path.is_null() {
+        let path_str = CStr::from_ptr(path).to_string_lossy();
+        if should_overlay(&path_str) {
+            if let Some(overlay_cstr) = get_overlay_cstr() {
+                eprintln!("[aegis-hooks] stat64({}) -> overlay", path_str);
+                return match *REAL_STAT64 {
+                    Some(f) => f(overlay_cstr.as_ptr(), buf),
+                    None => { *libc::__errno_location() = libc::ENOSYS; -1 }
+                };
+            }
+        }
+    }
+    match *REAL_STAT64 {
+        Some(f) => f(path, buf),
+        None => { *libc::__errno_location() = libc::ENOSYS; -1 }
+    }
+}
+
+/// Intercepted lstat() - makes overlay target appear to exist
+#[no_mangle]
+pub unsafe extern "C" fn lstat(path: *const c_char, buf: *mut libc::stat) -> c_int {
+    if !path.is_null() {
+        let path_str = CStr::from_ptr(path).to_string_lossy();
+        if should_overlay(&path_str) {
+            if let Some(overlay_cstr) = get_overlay_cstr() {
+                return match *REAL_LSTAT {
+                    Some(f) => f(overlay_cstr.as_ptr(), buf),
+                    None => { *libc::__errno_location() = libc::ENOSYS; -1 }
+                };
+            }
+        }
+    }
+    match *REAL_LSTAT {
+        Some(f) => f(path, buf),
+        None => { *libc::__errno_location() = libc::ENOSYS; -1 }
+    }
+}
+
+/// Intercepted lstat64() - makes overlay target appear to exist
+#[no_mangle]
+pub unsafe extern "C" fn lstat64(path: *const c_char, buf: *mut libc::stat64) -> c_int {
+    if !path.is_null() {
+        let path_str = CStr::from_ptr(path).to_string_lossy();
+        if should_overlay(&path_str) {
+            if let Some(overlay_cstr) = get_overlay_cstr() {
+                return match *REAL_LSTAT64 {
+                    Some(f) => f(overlay_cstr.as_ptr(), buf),
+                    None => { *libc::__errno_location() = libc::ENOSYS; -1 }
+                };
+            }
+        }
+    }
+    match *REAL_LSTAT64 {
+        Some(f) => f(path, buf),
+        None => { *libc::__errno_location() = libc::ENOSYS; -1 }
+    }
+}
+
+/// Intercepted access() - makes overlay target appear to exist
+#[no_mangle]
+pub unsafe extern "C" fn access(path: *const c_char, mode: c_int) -> c_int {
+    if !path.is_null() {
+        let path_str = CStr::from_ptr(path).to_string_lossy();
+        if should_overlay(&path_str) {
+            if let Some(overlay_cstr) = get_overlay_cstr() {
+                eprintln!("[aegis-hooks] access({}) -> overlay", path_str);
+                return match *REAL_ACCESS {
+                    Some(f) => f(overlay_cstr.as_ptr(), mode),
+                    None => { *libc::__errno_location() = libc::ENOSYS; -1 }
+                };
+            }
+        }
+    }
+    match *REAL_ACCESS {
+        Some(f) => f(path, mode),
+        None => { *libc::__errno_location() = libc::ENOSYS; -1 }
     }
 }
 
