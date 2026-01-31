@@ -263,6 +263,11 @@ type OpenatFn = unsafe extern "C" fn(c_int, *const c_char, c_int, mode_t) -> c_i
 type StatFn = unsafe extern "C" fn(*const c_char, *mut libc::stat) -> c_int;
 type Stat64Fn = unsafe extern "C" fn(*const c_char, *mut libc::stat64) -> c_int;
 type AccessFn = unsafe extern "C" fn(*const c_char, c_int) -> c_int;
+// statx: int statx(int dirfd, const char *pathname, int flags, unsigned int mask, struct statx *statxbuf)
+type StatxFn = unsafe extern "C" fn(c_int, *const c_char, c_int, libc::c_uint, *mut libc::statx) -> c_int;
+type FstatatFn = unsafe extern "C" fn(c_int, *const c_char, *mut libc::stat, c_int) -> c_int;
+type Fstatat64Fn = unsafe extern "C" fn(c_int, *const c_char, *mut libc::stat64, c_int) -> c_int;
+type FaccessatFn = unsafe extern "C" fn(c_int, *const c_char, c_int, c_int) -> c_int;
 
 /// Get the original libc function using dlsym
 unsafe fn get_real_fn<T>(name: &str) -> Option<T> {
@@ -299,6 +304,11 @@ static REAL_STAT64: Lazy<Option<Stat64Fn>> = Lazy::new(|| unsafe { get_real_fn("
 static REAL_LSTAT: Lazy<Option<StatFn>> = Lazy::new(|| unsafe { get_real_fn("lstat") });
 static REAL_LSTAT64: Lazy<Option<Stat64Fn>> = Lazy::new(|| unsafe { get_real_fn("lstat64") });
 static REAL_ACCESS: Lazy<Option<AccessFn>> = Lazy::new(|| unsafe { get_real_fn("access") });
+static REAL_STATX: Lazy<Option<StatxFn>> = Lazy::new(|| unsafe { get_real_fn("statx") });
+static REAL_FSTATAT: Lazy<Option<FstatatFn>> = Lazy::new(|| unsafe { get_real_fn("fstatat") });
+static REAL_FSTATAT64: Lazy<Option<Fstatat64Fn>> = Lazy::new(|| unsafe { get_real_fn("fstatat64") });
+static REAL_FACCESSAT: Lazy<Option<FaccessatFn>> = Lazy::new(|| unsafe { get_real_fn("faccessat") });
+static REAL_FACCESSAT2: Lazy<Option<FaccessatFn>> = Lazy::new(|| unsafe { get_real_fn("faccessat2") });
 
 // ============================================================================
 // Network Function Interception
@@ -681,6 +691,145 @@ pub unsafe extern "C" fn access(path: *const c_char, mode: c_int) -> c_int {
     match *REAL_ACCESS {
         Some(f) => f(path, mode),
         None => { *libc::__errno_location() = libc::ENOSYS; -1 }
+    }
+}
+
+/// Intercepted statx() - modern stat syscall used by glibc 2.28+
+/// int statx(int dirfd, const char *pathname, int flags, unsigned int mask, struct statx *statxbuf)
+#[no_mangle]
+pub unsafe extern "C" fn statx(
+    dirfd: c_int,
+    path: *const c_char,
+    flags: c_int,
+    mask: libc::c_uint,
+    statxbuf: *mut libc::statx,
+) -> c_int {
+    if !path.is_null() {
+        let path_str = CStr::from_ptr(path).to_string_lossy();
+        if should_overlay(&path_str) {
+            if let Some(overlay_cstr) = get_overlay_cstr() {
+                return match *REAL_STATX {
+                    Some(f) => f(libc::AT_FDCWD, overlay_cstr.as_ptr(), flags, mask, statxbuf),
+                    None => { *libc::__errno_location() = libc::ENOSYS; -1 }
+                };
+            }
+        }
+    }
+    match *REAL_STATX {
+        Some(f) => f(dirfd, path, flags, mask, statxbuf),
+        None => { *libc::__errno_location() = libc::ENOSYS; -1 }
+    }
+}
+
+/// Intercepted fstatat() - stat relative to directory fd
+#[no_mangle]
+pub unsafe extern "C" fn fstatat(
+    dirfd: c_int,
+    path: *const c_char,
+    buf: *mut libc::stat,
+    flags: c_int,
+) -> c_int {
+    if !path.is_null() {
+        let path_str = CStr::from_ptr(path).to_string_lossy();
+        if should_overlay(&path_str) {
+            if let Some(overlay_cstr) = get_overlay_cstr() {
+                return match *REAL_FSTATAT {
+                    Some(f) => f(libc::AT_FDCWD, overlay_cstr.as_ptr(), buf, flags),
+                    None => { *libc::__errno_location() = libc::ENOSYS; -1 }
+                };
+            }
+        }
+    }
+    match *REAL_FSTATAT {
+        Some(f) => f(dirfd, path, buf, flags),
+        None => { *libc::__errno_location() = libc::ENOSYS; -1 }
+    }
+}
+
+/// Intercepted fstatat64() - 64-bit stat relative to directory fd
+#[no_mangle]
+pub unsafe extern "C" fn fstatat64(
+    dirfd: c_int,
+    path: *const c_char,
+    buf: *mut libc::stat64,
+    flags: c_int,
+) -> c_int {
+    if !path.is_null() {
+        let path_str = CStr::from_ptr(path).to_string_lossy();
+        if should_overlay(&path_str) {
+            if let Some(overlay_cstr) = get_overlay_cstr() {
+                return match *REAL_FSTATAT64 {
+                    Some(f) => f(libc::AT_FDCWD, overlay_cstr.as_ptr(), buf, flags),
+                    None => { *libc::__errno_location() = libc::ENOSYS; -1 }
+                };
+            }
+        }
+    }
+    match *REAL_FSTATAT64 {
+        Some(f) => f(dirfd, path, buf, flags),
+        None => { *libc::__errno_location() = libc::ENOSYS; -1 }
+    }
+}
+
+/// Intercepted faccessat() - check file access relative to directory fd
+#[no_mangle]
+pub unsafe extern "C" fn faccessat(
+    dirfd: c_int,
+    path: *const c_char,
+    mode: c_int,
+    flags: c_int,
+) -> c_int {
+    if !path.is_null() {
+        let path_str = CStr::from_ptr(path).to_string_lossy();
+        if should_overlay(&path_str) {
+            if let Some(overlay_cstr) = get_overlay_cstr() {
+                return match *REAL_FACCESSAT {
+                    Some(f) => f(libc::AT_FDCWD, overlay_cstr.as_ptr(), mode, flags),
+                    None => { *libc::__errno_location() = libc::ENOSYS; -1 }
+                };
+            }
+        }
+    }
+    match *REAL_FACCESSAT {
+        Some(f) => f(dirfd, path, mode, flags),
+        None => { *libc::__errno_location() = libc::ENOSYS; -1 }
+    }
+}
+
+/// Intercepted faccessat2() - newer version of faccessat
+#[no_mangle]
+pub unsafe extern "C" fn faccessat2(
+    dirfd: c_int,
+    path: *const c_char,
+    mode: c_int,
+    flags: c_int,
+) -> c_int {
+    if !path.is_null() {
+        let path_str = CStr::from_ptr(path).to_string_lossy();
+        if should_overlay(&path_str) {
+            if let Some(overlay_cstr) = get_overlay_cstr() {
+                return match *REAL_FACCESSAT2 {
+                    Some(f) => f(libc::AT_FDCWD, overlay_cstr.as_ptr(), mode, flags),
+                    None => {
+                        // faccessat2 might not exist, fall back to faccessat
+                        match *REAL_FACCESSAT {
+                            Some(f) => f(libc::AT_FDCWD, overlay_cstr.as_ptr(), mode, flags),
+                            None => { *libc::__errno_location() = libc::ENOSYS; -1 }
+                        }
+                    }
+                };
+            }
+        }
+    }
+    match *REAL_FACCESSAT2 {
+        Some(f) => f(dirfd, path, mode, flags),
+        None => {
+            // Fall back to faccessat
+            match *REAL_FACCESSAT {
+                Some(f) => f(dirfd, path, mode, flags),
+                None => { *libc::__errno_location() = libc::ENOSYS; -1 }
+            }
+        }
     }
 }
 

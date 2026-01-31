@@ -21,6 +21,7 @@ anyhow = "1"
 which = "7"
 dirs = "6"
 ctrlc = "3"
+signal-hook = "0.3"
 humantime = "2"
 
 # Async runtime for agent pool

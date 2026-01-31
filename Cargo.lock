@@ -30,6 +30,7 @@ dependencies = [
  "ratatui-interact",
  "serde",
  "serde_json",
+ "signal-hook",
  "sysinfo",
  "tempfile",
  "tokio",
