@@ -223,6 +223,13 @@ static MCP_CONFIG: Lazy<Option<(String, CString)>> = Lazy::new(|| {
     Some((target, overlay_cstr))
 });
 
+/// Debug logging for file operations (enabled via AEGIS_DEBUG=1)
+fn debug_log(msg: &str) {
+    if std::env::var("AEGIS_DEBUG").is_ok() {
+        eprintln!("[aegis-hooks] {}", msg);
+    }
+}
+
 /// Check if a path matches the MCP target file
 fn should_overlay(path_str: &str) -> bool {
     if let Some((ref target, _)) = *MCP_CONFIG {
@@ -230,7 +237,11 @@ fn should_overlay(path_str: &str) -> bool {
         // This handles both ".mcp.json" and "/path/to/.mcp.json"
         let path = Path::new(path_str);
         if let Some(filename) = path.file_name() {
-            return filename.to_string_lossy() == *target;
+            let matches = filename.to_string_lossy() == *target;
+            if matches {
+                debug_log(&format!("MATCH: {} matches target {}", path_str, target));
+            }
+            return matches;
         }
     }
     false
@@ -269,6 +280,9 @@ type FstatatFn = unsafe extern "C" fn(c_int, *const c_char, *mut libc::stat, c_i
 type Fstatat64Fn = unsafe extern "C" fn(c_int, *const c_char, *mut libc::stat64, c_int) -> c_int;
 type FaccessatFn = unsafe extern "C" fn(c_int, *const c_char, c_int, c_int) -> c_int;
 
+// Syscall function type (variadic, but we handle specific cases)
+type SyscallFn = unsafe extern "C" fn(libc::c_long, ...) -> libc::c_long;
+
 /// Get the original libc function using dlsym
 unsafe fn get_real_fn<T>(name: &str) -> Option<T> {
     let name_cstr = CString::new(name).ok()?;
@@ -299,6 +313,7 @@ static REAL_CLOSE: Lazy<Option<CloseFn>> = Lazy::new(|| unsafe { get_real_fn("cl
 static REAL_OPEN: Lazy<Option<OpenFn>> = Lazy::new(|| unsafe { get_real_fn("open") });
 static REAL_OPEN64: Lazy<Option<OpenFn>> = Lazy::new(|| unsafe { get_real_fn("open64") });
 static REAL_OPENAT: Lazy<Option<OpenatFn>> = Lazy::new(|| unsafe { get_real_fn("openat") });
+static REAL_OPENAT64: Lazy<Option<OpenatFn>> = Lazy::new(|| unsafe { get_real_fn("openat64") });
 static REAL_STAT: Lazy<Option<StatFn>> = Lazy::new(|| unsafe { get_real_fn("stat") });
 static REAL_STAT64: Lazy<Option<Stat64Fn>> = Lazy::new(|| unsafe { get_real_fn("stat64") });
 static REAL_LSTAT: Lazy<Option<StatFn>> = Lazy::new(|| unsafe { get_real_fn("lstat") });
@@ -309,6 +324,7 @@ static REAL_FSTATAT: Lazy<Option<FstatatFn>> = Lazy::new(|| unsafe { get_real_fn
 static REAL_FSTATAT64: Lazy<Option<Fstatat64Fn>> = Lazy::new(|| unsafe { get_real_fn("fstatat64") });
 static REAL_FACCESSAT: Lazy<Option<FaccessatFn>> = Lazy::new(|| unsafe { get_real_fn("faccessat") });
 static REAL_FACCESSAT2: Lazy<Option<FaccessatFn>> = Lazy::new(|| unsafe { get_real_fn("faccessat2") });
+static REAL_SYSCALL: Lazy<Option<SyscallFn>> = Lazy::new(|| unsafe { get_real_fn("syscall") });
 
 // ============================================================================
 // Network Function Interception
@@ -565,6 +581,11 @@ pub unsafe extern "C" fn openat(
     if !path.is_null() {
         let path_str = CStr::from_ptr(path).to_string_lossy();
 
+        // Debug: log all file opens if AEGIS_DEBUG is set
+        if path_str.contains(".mcp") || path_str.contains("mcp.json") {
+            debug_log(&format!("openat: dirfd={} path={}", dirfd, path_str));
+        }
+
         if should_overlay(&path_str) {
             // Redirect to overlay file (use AT_FDCWD to ignore dirfd)
             if let Some(overlay_cstr) = get_overlay_cstr() {
@@ -586,6 +607,44 @@ pub unsafe extern "C" fn openat(
         None => {
             *libc::__errno_location() = libc::ENOSYS;
             -1
+        }
+    }
+}
+
+/// Intercepted openat64() function - 64-bit version
+#[no_mangle]
+pub unsafe extern "C" fn openat64(
+    dirfd: c_int,
+    path: *const c_char,
+    flags: c_int,
+    mode: mode_t,
+) -> c_int {
+    if !path.is_null() {
+        let path_str = CStr::from_ptr(path).to_string_lossy();
+
+        if path_str.contains(".mcp") || path_str.contains("mcp.json") {
+            debug_log(&format!("openat64: dirfd={} path={}", dirfd, path_str));
+        }
+
+        if should_overlay(&path_str) {
+            if let Some(overlay_cstr) = get_overlay_cstr() {
+                eprintln!("[aegis-hooks] REDIRECTING {} -> overlay (openat64)", path_str);
+                return match *REAL_OPENAT64 {
+                    Some(f) => f(libc::AT_FDCWD, overlay_cstr.as_ptr(), flags, mode),
+                    None => match *REAL_OPENAT {
+                        Some(f) => f(libc::AT_FDCWD, overlay_cstr.as_ptr(), flags, mode),
+                        None => { *libc::__errno_location() = libc::ENOSYS; -1 }
+                    }
+                };
+            }
+        }
+    }
+
+    match *REAL_OPENAT64 {
+        Some(f) => f(dirfd, path, flags, mode),
+        None => match *REAL_OPENAT {
+            Some(f) => f(dirfd, path, flags, mode),
+            None => { *libc::__errno_location() = libc::ENOSYS; -1 }
         }
     }
 }

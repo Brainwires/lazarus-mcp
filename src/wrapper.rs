@@ -24,23 +24,21 @@ use crate::watchdog::{self, HealthStatus, LockupAction, ProcessState, SharedWatc
 // Crash Cleanup Registry
 // ============================================================================
 
-/// Global registry of files to clean up on crash/exit
+/// Global registry for cleanup on crash/exit
 static CLEANUP_REGISTRY: Mutex<Option<CleanupRegistry>> = Mutex::new(None);
 
 #[derive(Default)]
 struct CleanupRegistry {
-    overlay_path: Option<PathBuf>,
-    stub_created: bool,
-    marker_path: Option<PathBuf>,
+    mcp_backup_path: Option<PathBuf>,
+    mcp_target_path: Option<PathBuf>,
 }
 
-/// Register files for cleanup on crash
-fn register_cleanup(overlay: Option<PathBuf>, stub_created: bool) {
+/// Register for cleanup on crash
+fn register_cleanup(backup_path: Option<PathBuf>, target_path: Option<PathBuf>) {
     if let Ok(mut guard) = CLEANUP_REGISTRY.lock() {
         *guard = Some(CleanupRegistry {
-            overlay_path: overlay,
-            stub_created,
-            marker_path: Some(mcp_marker_path()),
+            mcp_backup_path: backup_path,
+            mcp_target_path: target_path,
         });
     }
 }
@@ -49,22 +47,11 @@ fn register_cleanup(overlay: Option<PathBuf>, stub_created: bool) {
 fn emergency_cleanup() {
     if let Ok(guard) = CLEANUP_REGISTRY.lock() {
         if let Some(ref registry) = *guard {
-            // Remove overlay file
-            if let Some(ref path) = registry.overlay_path {
-                let _ = fs::remove_file(path);
-            }
-            // Remove marker file
-            if let Some(ref path) = registry.marker_path {
-                let _ = fs::remove_file(path);
-            }
-            // Remove stub if we created it and no other instances
-            if registry.stub_created && !other_aegis_instances_exist() {
-                let mcp_path = Path::new(MCP_TARGET_FILE);
-                if let Ok(content) = fs::read_to_string(mcp_path) {
-                    let trimmed = content.trim();
-                    if trimmed == "{\"mcpServers\":{}}" || trimmed == "{ \"mcpServers\": {} }" {
-                        let _ = fs::remove_file(mcp_path);
-                    }
+            // Restore .mcp.json from backup
+            if let (Some(ref backup), Some(ref target)) = (&registry.mcp_backup_path, &registry.mcp_target_path) {
+                if backup.exists() {
+                    let _ = fs::copy(backup, target);
+                    let _ = fs::remove_file(backup);
                 }
             }
         }
@@ -98,11 +85,7 @@ const SIGNAL_FILE_PREFIX: &str = "/tmp/aegis-mcp-";
 const WATCHDOG_PING_PREFIX: &str = "/tmp/aegis-watchdog-ping-";
 const WATCHDOG_CONFIG_PREFIX: &str = "/tmp/aegis-watchdog-config-";
 
-/// Environment variable for MCP overlay file path
-const MCP_OVERLAY_ENV: &str = "AEGIS_MCP_OVERLAY";
-/// Environment variable for target file to overlay
-const MCP_TARGET_ENV: &str = "AEGIS_MCP_TARGET";
-/// Default target file for MCP overlay
+/// Target file for MCP config
 const MCP_TARGET_FILE: &str = ".mcp.json";
 
 /// Shared state file for TUI/MCP communication
@@ -313,106 +296,89 @@ struct ParsedRestartSignal {
     prompt: Option<String>,
 }
 
-/// Get the MCP overlay file path for this process
-fn mcp_overlay_path() -> PathBuf {
-    PathBuf::from(format!("/tmp/aegis-mcp-overlay-{}.json", process::id()))
+/// Backup path for .mcp.json
+fn mcp_backup_path() -> PathBuf {
+    PathBuf::from(".mcp.json.aegis-backup")
 }
 
-/// Get the marker file path for this process (tracks our instance)
-fn mcp_marker_path() -> PathBuf {
-    PathBuf::from(format!(".mcp.json.aegis.{}", process::id()))
-}
+/// Restore .mcp.json from backup if a previous run crashed
+fn restore_mcp_if_dirty() {
+    let backup = mcp_backup_path();
+    let target = Path::new(MCP_TARGET_FILE);
 
-/// Check if any other aegis-mcp instances are using the .mcp.json in this directory
-fn other_aegis_instances_exist() -> bool {
-    let current_marker = mcp_marker_path();
-    if let Ok(entries) = fs::read_dir(".") {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if name_str.starts_with(".mcp.json.aegis.") && entry.path() != current_marker {
-                // Check if the PID is still running
-                if let Some(pid_str) = name_str.strip_prefix(".mcp.json.aegis.") {
-                    if let Ok(pid) = pid_str.parse::<u32>() {
-                        if Path::new(&format!("/proc/{}", pid)).exists() {
-                            return true;
-                        } else {
-                            // Stale marker, clean it up
-                            let _ = fs::remove_file(entry.path());
-                        }
-                    }
-                }
-            }
-        }
-    }
-    false
-}
-
-/// Create a stub .mcp.json file on disk so Claude sees it exists
-/// The actual content will be intercepted by LD_PRELOAD and replaced with overlay
-fn create_mcp_stub_file() -> Result<bool> {
-    let mcp_path = Path::new(MCP_TARGET_FILE);
-
-    // Create marker file first to track our instance
-    let marker_path = mcp_marker_path();
-    fs::write(&marker_path, format!("{}", process::id()))?;
-
-    if mcp_path.exists() {
-        // File already exists (either from another aegis instance or user-created)
-        info!("Using existing {}", MCP_TARGET_FILE);
-        return Ok(false); // false = we didn't create it
-    }
-
-    // Create minimal valid MCP config - hooks replace content on read
-    fs::write(mcp_path, "{\"mcpServers\":{}}\n")?;
-    info!("Created stub {}", MCP_TARGET_FILE);
-
-    Ok(true) // true = we created it
-}
-
-/// Clean up stub .mcp.json if no other instances are using it
-/// Note: we_created_it is unused now - any last instance cleans up orphaned stubs
-fn cleanup_mcp_stub_file(_we_created_it: bool) {
-    let marker_path = mcp_marker_path();
-
-    // Remove our marker first
-    let _ = fs::remove_file(&marker_path);
-
-    // Check if any other instances exist (this also cleans up stale markers from crashed processes)
-    // If we're the last instance, clean up any orphaned stub file
-    if !other_aegis_instances_exist() {
-        let mcp_path = Path::new(MCP_TARGET_FILE);
-        if mcp_path.exists() {
-            // Only remove if it's a minimal stub (no user modifications)
-            if let Ok(content) = fs::read_to_string(mcp_path) {
-                let trimmed = content.trim();
-                if trimmed == "{\"mcpServers\":{}}" || trimmed == "{ \"mcpServers\": {} }" {
-                    let _ = fs::remove_file(mcp_path);
-                    info!("Cleaned up stub {}", MCP_TARGET_FILE);
-                }
-            }
+    if backup.exists() {
+        warn!("Found .mcp.json backup from previous crash - restoring");
+        if let Err(e) = fs::copy(&backup, target) {
+            warn!("Failed to restore .mcp.json from backup: {}", e);
+        } else {
+            let _ = fs::remove_file(&backup);
+            info!("Restored .mcp.json from backup");
         }
     }
 }
 
-/// Create the MCP server configuration JSON for aegis-mcp
-/// For Claude, this is passed via --mcp-config and merged with other configs
-/// For other agents, this is used with LD_PRELOAD overlay
-fn create_mcp_config() -> Result<String> {
+/// Inject aegis-mcp into .mcp.json (with backup for restore on exit)
+fn inject_mcp_server() -> Result<(PathBuf, PathBuf)> {
     let aegis_path = std::env::current_exe()
         .context("Failed to get current executable path")?;
 
-    // Create config with just aegis-mcp - Claude will merge with project config
-    let config = json!({
-        "mcpServers": {
-            "aegis-mcp": {
-                "command": aegis_path.to_string_lossy(),
-                "args": ["--mcp-server"]
-            }
-        }
+    let mcp_path = PathBuf::from(MCP_TARGET_FILE);
+    let backup_path = mcp_backup_path();
+
+    // Read existing config or create empty one
+    let mut config: serde_json::Value = if mcp_path.exists() {
+        // Backup the original first
+        fs::copy(&mcp_path, &backup_path)
+            .context("Failed to backup .mcp.json")?;
+
+        let content = fs::read_to_string(&mcp_path)
+            .context("Failed to read existing .mcp.json")?;
+        serde_json::from_str(&content)
+            .context("Failed to parse existing .mcp.json")?
+    } else {
+        // Create backup marker (empty file) so we know to delete .mcp.json on restore
+        fs::write(&backup_path, "")
+            .context("Failed to create backup marker")?;
+        json!({ "mcpServers": {} })
+    };
+
+    // Ensure mcpServers object exists
+    if config.get("mcpServers").is_none() {
+        config["mcpServers"] = json!({});
+    }
+
+    // Inject aegis-mcp server
+    config["mcpServers"]["aegis-mcp"] = json!({
+        "command": aegis_path.to_string_lossy(),
+        "args": ["--mcp-server"]
     });
 
-    Ok(serde_json::to_string_pretty(&config)?)
+    // Write modified config
+    let content = serde_json::to_string_pretty(&config)?;
+    fs::write(&mcp_path, &content)?;
+
+    info!("Injected aegis-mcp into .mcp.json (backup at {})", backup_path.display());
+    Ok((backup_path, mcp_path))
+}
+
+/// Remove aegis-mcp from .mcp.json (restore from backup)
+fn restore_mcp_config(backup_path: &Path, target_path: &Path) {
+    if backup_path.exists() {
+        // Check if backup is empty (meaning original didn't exist)
+        if fs::metadata(backup_path).map(|m| m.len() == 0).unwrap_or(false) {
+            // Original didn't exist, delete the file we created
+            let _ = fs::remove_file(target_path);
+            info!("Removed injected .mcp.json (original didn't exist)");
+        } else {
+            // Restore from backup
+            if let Err(e) = fs::copy(backup_path, target_path) {
+                warn!("Failed to restore .mcp.json: {}", e);
+            } else {
+                info!("Restored original .mcp.json");
+            }
+        }
+        let _ = fs::remove_file(backup_path);
+    }
 }
 
 /// Find the hooks library (libaegis_hooks.so)
@@ -422,6 +388,8 @@ fn find_hooks_library() -> Result<PathBuf> {
         std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.join("libaegis_hooks.so"))),
+        // In ~/.local/lib (common user install location)
+        dirs::home_dir().map(|h| h.join(".local/lib/libaegis_hooks.so")),
         // In the same directory as the binary
         Some(PathBuf::from("./libaegis_hooks.so")),
         // System lib directories
@@ -688,50 +656,25 @@ pub fn run_with_watchdog(
         }
     }
 
-    // Create MCP overlay file and stub for process-isolated injection
-    let (mcp_overlay_file, mcp_stub_created) = if inject_mcp {
-        // First create the overlay file in /tmp with injected config
-        let overlay = match create_mcp_config() {
-            Ok(config) => {
-                let overlay_path = mcp_overlay_path();
-                match fs::write(&overlay_path, &config) {
-                    Ok(()) => {
-                        info!("Created MCP overlay at: {}", overlay_path.display());
-                        Some(overlay_path)
-                    }
-                    Err(e) => {
-                        warn!("Failed to write MCP overlay: {}. Continuing without injection.", e);
-                        None
-                    }
-                }
-            }
+    // Restore .mcp.json if a previous run crashed
+    restore_mcp_if_dirty();
+
+    // Inject aegis-mcp into .mcp.json
+    let mcp_paths = if inject_mcp {
+        match inject_mcp_server() {
+            Ok(paths) => Some(paths),
             Err(e) => {
-                warn!("Failed to create MCP config: {}. Continuing without injection.", e);
+                warn!("Failed to inject MCP server: {}. Continuing without injection.", e);
                 None
             }
-        };
-
-        // Then create stub .mcp.json so Claude sees it exists
-        let stub_created = if overlay.is_some() {
-            match create_mcp_stub_file() {
-                Ok(created) => created,
-                Err(e) => {
-                    warn!("Failed to create stub .mcp.json: {}. Injection may not work.", e);
-                    false
-                }
-            }
-        } else {
-            false
-        };
-
-        (overlay, stub_created)
+        }
     } else {
         info!("MCP auto-injection disabled");
-        (None, false)
+        None
     };
 
-    // Find and verify hooks library if MCP injection or netmon is enabled
-    let hooks_library = if mcp_overlay_file.is_some() || netmon_mode.is_some() {
+    // Find and verify hooks library if netmon is enabled
+    let hooks_library = if netmon_mode.is_some() {
         match find_hooks_library() {
             Ok(path) => {
                 // Verify library version
@@ -761,8 +704,9 @@ pub fn run_with_watchdog(
     // Install panic hook for crash cleanup
     install_panic_hook();
 
-    // Register files for cleanup on crash
-    register_cleanup(mcp_overlay_file.clone(), mcp_stub_created);
+    // Register for cleanup on crash
+    let (backup_path, target_path) = mcp_paths.clone().unzip();
+    register_cleanup(backup_path, target_path);
 
     // Clean up any stale signal files
     let _ = fs::remove_file(signal_file_path());
@@ -822,38 +766,19 @@ pub fn run_with_watchdog(
             args.push(prompt);
         }
 
-        // For Claude, use --mcp-config to inject aegis-mcp server (more reliable than LD_PRELOAD)
-        if agent.name == "claude" {
-            if let Some(ref overlay_path) = mcp_overlay_file {
-                args.push("--mcp-config".to_string());
-                args.push(overlay_path.to_string_lossy().to_string());
-                info!("Using --mcp-config for MCP injection: {}", overlay_path.display());
-            }
-        }
-
         info!("Starting {} with args: {:?}", agent.name, args);
 
         // Build environment variables for the agent
         let mut extra_env: HashMap<String, String> = HashMap::new();
 
-        // Add LD_PRELOAD for hooks library (for network monitoring, NOT for MCP injection on Claude)
-        // Claude uses --mcp-config instead which is more reliable
+        // Add LD_PRELOAD for hooks library (MCP overlay + network monitoring)
         if let Some(ref lib_path) = hooks_library {
-            if netmon_mode.is_some() {
-                extra_env.insert("LD_PRELOAD".to_string(), lib_path.to_string_lossy().to_string());
-            }
+            extra_env.insert("LD_PRELOAD".to_string(), lib_path.to_string_lossy().to_string());
+            // Enable debug logging for hooks
+            extra_env.insert("AEGIS_DEBUG".to_string(), "1".to_string());
         }
 
-        // Add MCP overlay environment variables (for non-Claude agents that use LD_PRELOAD)
-        if agent.name != "claude" {
-            if let Some(ref overlay_path) = mcp_overlay_file {
-                if let Some(ref lib_path) = hooks_library {
-                    extra_env.insert("LD_PRELOAD".to_string(), lib_path.to_string_lossy().to_string());
-                }
-                extra_env.insert(MCP_OVERLAY_ENV.to_string(), overlay_path.to_string_lossy().to_string());
-                extra_env.insert(MCP_TARGET_ENV.to_string(), MCP_TARGET_FILE.to_string());
-            }
-        }
+        // MCP injection is done directly in .mcp.json, no env vars needed
 
         // Update shared state
         shared_state.agent_status = AgentState::Starting;
@@ -937,14 +862,10 @@ pub fn run_with_watchdog(
     let _ = fs::remove_file(watchdog_config_path());
     let _ = fs::remove_file(SharedState::state_file_path());
 
-    // Clean up MCP overlay file
-    if let Some(ref overlay_path) = mcp_overlay_file {
-        let _ = fs::remove_file(overlay_path);
-        info!("Cleaned up MCP overlay file");
+    // Restore .mcp.json from backup
+    if let Some((ref backup_path, ref target_path)) = mcp_paths {
+        restore_mcp_config(backup_path, target_path);
     }
-
-    // Clean up stub .mcp.json if we created it and no other instances need it
-    cleanup_mcp_stub_file(mcp_stub_created);
 
     info!("Wrapper cleanup complete");
 

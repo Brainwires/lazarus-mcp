@@ -110,6 +110,8 @@ fn find_netmon_library() -> Result<PathBuf> {
         env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.join("libaegis_hooks.so"))),
+        // In ~/.local/lib (common user install location)
+        dirs::home_dir().map(|h| h.join(".local/lib/libaegis_hooks.so")),
         // In the same directory as the binary
         Some(PathBuf::from("./libaegis_hooks.so")),
         // System lib directories

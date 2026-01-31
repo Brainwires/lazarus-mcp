@@ -22,6 +22,8 @@ install: release
 		echo "Removing old cargo install at ~/.cargo/bin/aegis-mcp"; \
 		rm -f "$(HOME)/.cargo/bin/aegis-mcp"; \
 	fi
+	@# Remove before copy to handle "text file busy" (binary in use)
+	rm -f $(BINDIR)/aegis-mcp
 	cp target/release/aegis-mcp $(BINDIR)/
 	cp target/release/libaegis_hooks.so $(LIBDIR)/
 	@echo ""
