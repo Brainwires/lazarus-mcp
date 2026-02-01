@@ -9,7 +9,6 @@ use ratatui::{
 };
 
 use super::app::{App, LogLevel, Panel};
-use crate::watchdog::ProcessState;
 use crate::wrapper::AgentState;
 
 /// Draw the entire UI
@@ -59,7 +58,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_body(f: &mut Frame, app: &mut App, area: Rect) {
-    // Split into left column (agent + system) and right column (pool + network + locks + log)
+    // Split into left column (agent) and right column (pool + locks + log)
     let body_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -68,33 +67,21 @@ fn draw_body(f: &mut Frame, app: &mut App, area: Rect) {
         ])
         .split(area);
 
-    // Left column: Agent status + System
-    let left_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(60),
-            Constraint::Percentage(40),
-        ])
-        .split(body_chunks[0]);
+    draw_agent_panel(f, app, body_chunks[0]);
 
-    draw_agent_panel(f, app, left_chunks[0]);
-    draw_system_panel(f, app, left_chunks[1]);
-
-    // Right column: Pool + Network + Locks + Log
+    // Right column: Pool + Locks + Log
     let right_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(8),  // Pool
-            Constraint::Length(8),  // Network
-            Constraint::Length(5),  // Locks
-            Constraint::Min(5),     // Log
+            Constraint::Length(6),  // Pool
+            Constraint::Length(4),  // Locks
+            Constraint::Min(6),     // Log
         ])
         .split(body_chunks[1]);
 
     draw_pool_panel(f, app, right_chunks[0]);
-    draw_network_panel(f, app, right_chunks[1]);
-    draw_locks_panel(f, app, right_chunks[2]);
-    draw_log_panel(f, app, right_chunks[3]);
+    draw_locks_panel(f, app, right_chunks[1]);
+    draw_log_panel(f, app, right_chunks[2]);
 }
 
 fn draw_agent_panel(f: &mut Frame, app: &App, area: Rect) {
@@ -136,49 +123,9 @@ fn draw_agent_panel(f: &mut Frame, app: &App, area: Rect) {
             lines.push(Line::from(format!("PID: {}", pid)));
         }
 
+        lines.push(Line::from(format!("Wrapper PID: {}", state.wrapper_pid)));
         lines.push(Line::from(format!("Uptime: {}", app.uptime_str())));
         lines.push(Line::from(format!("Restarts: {}", state.restart_count)));
-
-        // Health info
-        if let Some(health) = &state.health {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled("Health:", Style::default().add_modifier(Modifier::BOLD))));
-
-            let (state_icon, state_color) = match health.state {
-                ProcessState::Active => ("●", Color::Green),
-                ProcessState::Starting => ("◐", Color::Yellow),
-                ProcessState::Idle => ("○", Color::Yellow),
-                ProcessState::Unresponsive => ("!", Color::Red),
-                ProcessState::HighResource => ("▲", Color::Magenta),
-                ProcessState::Exited => ("×", Color::Gray),
-            };
-
-            lines.push(Line::from(vec![
-                Span::raw("  State: "),
-                Span::styled(format!("{} {:?}", state_icon, health.state), Style::default().fg(state_color)),
-            ]));
-
-            lines.push(Line::from(format!("  Last activity: {}s ago", health.last_activity_secs)));
-            lines.push(Line::from(format!("  Memory: {} MB", health.memory_mb)));
-            lines.push(Line::from(format!("  CPU: {:.1}%", health.cpu_percent)));
-
-            if health.unresponsive_count > 0 {
-                lines.push(Line::from(vec![
-                    Span::raw("  Unresponsive: "),
-                    Span::styled(
-                        format!("{}", health.unresponsive_count),
-                        Style::default().fg(Color::Red),
-                    ),
-                ]));
-            }
-
-            if let Some(action) = &health.action_pending {
-                lines.push(Line::from(vec![
-                    Span::styled("  ⚠ Action: ", Style::default().fg(Color::Yellow)),
-                    Span::styled(format!("{:?}", action), Style::default().fg(Color::Yellow)),
-                ]));
-            }
-        }
     } else {
         lines.push(Line::from(Span::styled(
             "Waiting for agent data...",
@@ -187,56 +134,6 @@ fn draw_agent_panel(f: &mut Frame, app: &App, area: Rect) {
     }
 
     let content = Paragraph::new(lines).wrap(Wrap { trim: true });
-    f.render_widget(content, inner);
-}
-
-fn draw_system_panel(f: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default()
-        .title(" System ")
-        .borders(Borders::ALL);
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let mut lines = vec![];
-
-    if let Some(state) = &app.shared_state {
-        lines.push(Line::from(format!("Wrapper PID: {}", state.wrapper_pid)));
-
-        if let Some(health) = &state.health {
-            // Memory bar
-            let mem_percent = (health.memory_mb as f64 / 8192.0 * 100.0).min(100.0);
-            let bar_width = 20;
-            let filled = (mem_percent / 100.0 * bar_width as f64) as usize;
-            let empty = bar_width - filled;
-            let bar = format!("[{}{}]", "█".repeat(filled), "░".repeat(empty));
-
-            lines.push(Line::from(vec![
-                Span::raw("Memory: "),
-                Span::styled(bar, Style::default().fg(if mem_percent > 80.0 { Color::Red } else if mem_percent > 60.0 { Color::Yellow } else { Color::Green })),
-                Span::raw(format!(" {}MB", health.memory_mb)),
-            ]));
-
-            // CPU bar
-            let cpu_percent = health.cpu_percent.min(100.0);
-            let filled = (cpu_percent / 100.0 * bar_width as f32) as usize;
-            let empty = bar_width - filled;
-            let bar = format!("[{}{}]", "█".repeat(filled), "░".repeat(empty));
-
-            lines.push(Line::from(vec![
-                Span::raw("CPU:    "),
-                Span::styled(bar, Style::default().fg(if cpu_percent > 80.0 { Color::Red } else if cpu_percent > 60.0 { Color::Yellow } else { Color::Green })),
-                Span::raw(format!(" {:.1}%", cpu_percent)),
-            ]));
-        }
-    } else {
-        lines.push(Line::from(Span::styled(
-            "No system data",
-            Style::default().fg(Color::Gray),
-        )));
-    }
-
-    let content = Paragraph::new(lines);
     f.render_widget(content, inner);
 }
 
@@ -281,50 +178,6 @@ fn draw_pool_panel(f: &mut Frame, app: &App, area: Rect) {
 
         let list = List::new(items);
         f.render_widget(list, inner);
-    }
-}
-
-fn draw_network_panel(f: &mut Frame, app: &App, area: Rect) {
-    let selected = app.selected_panel == Panel::Network;
-    let border_style = if selected {
-        Style::default().fg(Color::Cyan)
-    } else {
-        Style::default()
-    };
-
-    let block = Block::default()
-        .title(" Network Activity ")
-        .borders(Borders::ALL)
-        .border_style(border_style);
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    if let Some(stats) = &app.network_stats {
-        let mut lines = vec![
-            Line::from(format!("Connections: {} total", stats.total_connections)),
-            Line::from(format!(
-                "Traffic: ↑ {} | ↓ {}",
-                format_bytes(stats.bytes_sent),
-                format_bytes(stats.bytes_received)
-            )),
-        ];
-
-        if !stats.top_targets.is_empty() {
-            lines.push(Line::from("Top targets:"));
-            for (target, count) in stats.top_targets.iter().take(3) {
-                lines.push(Line::from(format!("  {} ({})", target, count)));
-            }
-        }
-
-        let content = Paragraph::new(lines);
-        f.render_widget(content, inner);
-    } else {
-        let content = Paragraph::new(Span::styled(
-            "Network monitoring not active (use --netmon)",
-            Style::default().fg(Color::Gray),
-        ));
-        f.render_widget(content, inner);
     }
 }
 
@@ -393,7 +246,6 @@ fn draw_log_panel(f: &mut Frame, app: &App, area: Rect) {
 
             let (prefix, style) = match entry.level {
                 LogLevel::Info => ("INFO", Style::default().fg(Color::Green)),
-                LogLevel::Warn => ("WARN", Style::default().fg(Color::Yellow)),
                 LogLevel::Error => ("ERR ", Style::default().fg(Color::Red)),
             };
 
@@ -459,17 +311,4 @@ fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
-}
-
-/// Format bytes as human-readable string
-fn format_bytes(bytes: u64) -> String {
-    if bytes < 1024 {
-        format!("{} B", bytes)
-    } else if bytes < 1024 * 1024 {
-        format!("{:.1} KB", bytes as f64 / 1024.0)
-    } else if bytes < 1024 * 1024 * 1024 {
-        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-    } else {
-        format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
-    }
 }

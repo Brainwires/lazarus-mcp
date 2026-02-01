@@ -6,13 +6,12 @@ A universal agent supervisor with hot-reload support, multi-agent orchestration,
 
 - **Hot-Reload** - Restart your AI agent to pick up MCP server changes without losing terminal context
 - **Watchdog Monitoring** - Detect and recover from hung/unresponsive agents automatically
-- **TUI Dashboard** - Real-time terminal dashboard showing agent health, network, and pool status
+- **TUI Dashboard** - Real-time terminal dashboard showing agent health and pool status
 - **Multi-Agent Pool** - Spawn background agents to work on tasks autonomously
-- **Network Monitoring** - Track all network connections made by your agent (LD_PRELOAD or network namespace)
-- **Process Isolation** - MCP server auto-injection only affects the wrapped process
+- **Safe MCP Injection** - Auto-injects into `.mcp.json` with backup/restore on exit
 - **Privilege Safety** - Automatically drops root privileges before spawning agents
 - **Multi-Agent Support** - Works with Claude Code, Cursor, Aider, and more
-- **Version Tracking** - Embedded build timestamps and git hashes to detect stale builds
+- **Version Tracking** - Embedded build timestamps and git hashes
 
 ## Quick Start
 
@@ -27,7 +26,7 @@ aegis-mcp claude
 ```
 
 That's it! The wrapper automatically:
-- Injects itself as an MCP server (process-isolated, no file modifications)
+- Injects itself as an MCP server into `.mcp.json` (restored on exit)
 - Adds permission-skipping flags appropriate for the agent
 - Uses `--continue` on restarts to preserve session context
 - Monitors agent health and auto-restarts on lockup
@@ -38,26 +37,24 @@ That's it! The wrapper automatically:
 Terminal
   └── aegis-mcp claude (wrapper)
         │
+        ├── Modifies .mcp.json (backup at .mcp.json.aegis-backup)
         ├── Watchdog (monitors health, detects lockups)
-        ├── Shared State (/tmp/aegis-mcp-state-{pid})
-        │
-        ├── Environment: LD_PRELOAD=libaegis_hooks.so
-        │                AEGIS_MCP_OVERLAY=/tmp/aegis-mcp-overlay-{pid}.json
-        │                AEGIS_NETMON_LOG=/tmp/aegis-netmon-{pid}.jsonl (if --netmon)
+        ├── Shared State (/tmp/aegis-mcp-state-{pid}.json)
         │
         └── claude --dangerously-skip-permissions
               │
-              └── MCP servers (from overlay .mcp.json)
+              └── MCP servers (from .mcp.json)
                     └── aegis-mcp --mcp-server
                           ├── restart_claude
                           ├── watchdog_status/configure/disable/ping
-                          ├── agent_spawn/list/status/await/stop
-                          ├── agent_pool_stats
-                          └── netmon_status/log
+                          └── agent_spawn/list/status/await/stop
+
+On Exit (normal, signal, or crash):
+  └── Restores .mcp.json from backup
 
 Second Terminal (optional)
   └── aegis-mcp --dashboard
-        └── TUI showing real-time status from shared state
+        └── TUI showing real-time status
 ```
 
 ## Supported Agents
@@ -105,7 +102,6 @@ Dashboard panels:
 - **Primary Agent** - Status, PID, uptime, restarts, health state
 - **System** - Memory and CPU usage bars
 - **Agent Pool** - Background agents and their tasks
-- **Network Activity** - Connections, traffic, top targets
 - **File Locks** - Currently held locks
 - **Log** - Event log with timestamps
 
@@ -116,50 +112,27 @@ Keybindings:
 - `r` - Restart agent
 - `j` / `k` or arrows - Scroll log
 
-### With Network Monitoring
-
-```bash
-# LD_PRELOAD mode (works as normal user)
-aegis-mcp claude --netmon
-
-# Network namespace mode (requires root, better isolation)
-sudo aegis-mcp claude --netmon=netns
-```
-
 ### Watchdog Configuration
 
 ```bash
 # Custom timeout (default: 60 seconds)
-aegis-mcp claude --watchdog-timeout=120
+aegis-mcp --watchdog-timeout=120 claude
 
 # Disable watchdog
-aegis-mcp claude --no-watchdog
+aegis-mcp --no-watchdog claude
 ```
 
 ### Options
 
 | Option | Description |
 |--------|-------------|
-| `--version`, `-V` | Show version info for binary and hooks library |
+| `--version`, `-V` | Show version info |
 | `--dashboard [pid]` | Run TUI dashboard (monitor running wrapper) |
 | `--watchdog-timeout=<secs>` | Heartbeat timeout in seconds (default: 60) |
 | `--no-watchdog` | Disable watchdog monitoring |
-| `--netmon` | Enable network monitoring (LD_PRELOAD mode) |
-| `--netmon=preload` | Force LD_PRELOAD mode |
-| `--netmon=netns` | Force network namespace mode (requires root) |
 | `--no-inject-mcp` | Don't auto-inject aegis-mcp as an MCP server |
-| `--keep-root` | Stay root instead of dropping privileges |
 
-### Privilege Handling
-
-When run with sudo, aegis-mcp drops privileges before spawning the agent:
-
-```bash
-sudo aegis-mcp claude              # Sets up netns, then drops to original user
-sudo aegis-mcp claude --keep-root  # Stays root (for debugging only)
-```
-
-## MCP Tools (17 total)
+## MCP Tools
 
 ### Hot-Reload Tools
 
@@ -275,35 +248,6 @@ Get statistics about the agent pool (max agents, active, running, completed, fai
 
 List all currently held file locks by agents (for coordination).
 
-### Network Monitoring Tools
-
-Monitor all network connections made by the wrapped agent.
-
-#### netmon_status
-
-Get network monitoring status and statistics including:
-- Total connections
-- Unique addresses
-- Bytes sent/received
-- Top connection targets
-
-#### netmon_log
-
-Get recent network events from the monitoring log.
-
-```
-Parameters:
-- count (optional): Number of recent events to return (default: 20)
-```
-
-#### netmon_namespace_list
-
-List all aegis network namespaces (for `--netmon=netns` mode).
-
-#### netmon_namespace_cleanup
-
-Clean up stale network namespaces after crashes. Requires root.
-
 ## How It Works
 
 ### Watchdog Monitoring
@@ -323,48 +267,32 @@ The watchdog can be controlled via MCP tools or temporarily disabled for long op
 ### Hot-Reload
 
 1. User starts agent via `aegis-mcp claude`
-2. Wrapper spawns agent with LD_PRELOAD hooks
-3. Hooks intercept `.mcp.json` reads, redirecting to overlay file
-4. Agent loads aegis-mcp as an MCP server
+2. Wrapper backs up `.mcp.json` to `.mcp.json.aegis-backup`
+3. Wrapper injects aegis-mcp into `.mcp.json`
+4. Agent spawns and loads aegis-mcp as an MCP server
 5. When `restart_claude` is called:
    - MCP server writes signal file to `/tmp/aegis-mcp-{pid}`
    - Wrapper detects signal, sends SIGINT → SIGTERM → SIGKILL
    - Agent restarts with `--continue` flag
    - Session context is preserved
+6. On exit (normal, signal, or crash), `.mcp.json` is restored from backup
 
-### Network Monitoring (LD_PRELOAD)
+**Note:** The `restart_claude` tool detects if running under the wrapper. If started without the wrapper, it returns an error message explaining how to use aegis-mcp.
 
-The `libaegis_hooks.so` library intercepts:
-- `connect()` - Log connection attempts
-- `send()`/`sendto()` - Log bytes sent
-- `recv()`/`recvfrom()` - Log bytes received
-- `close()` - Log connection closes
+### MCP Server Injection
 
-All events are logged to `/tmp/aegis-netmon-{pid}.jsonl` in JSONL format.
+aegis-mcp injects itself into `.mcp.json` with automatic backup/restore:
 
-### Network Monitoring (Namespace)
+1. On startup, checks for `.mcp.json.aegis-backup` (previous crash recovery)
+2. Backs up existing `.mcp.json` to `.mcp.json.aegis-backup`
+3. Adds aegis-mcp server entry to `.mcp.json`
+4. Agent spawns and sees the injected MCP server
+5. On exit (normal, Ctrl+C, or crash), restores original `.mcp.json`
 
-When using `--netmon=netns`:
-1. Creates isolated network namespace `aegis-{pid}`
-2. Sets up veth pair for connectivity
-3. Configures NAT for internet access
-4. Agent runs inside the namespace
-5. All traffic is isolated and can be captured
-
-### Process-Isolated MCP Injection
-
-Instead of modifying `.mcp.json` on disk (which would affect all processes), aegis-mcp uses LD_PRELOAD filesystem interception:
-
-1. Creates temp overlay file `/tmp/aegis-mcp-overlay-{pid}.json`
-2. Sets `LD_PRELOAD=libaegis_hooks.so`
-3. Hooks intercept `open()`/`openat()` calls
-4. Reads of `.mcp.json` are redirected to the overlay
-5. Only the wrapped process sees the injected MCP server
-
-Benefits:
-- No file modifications
-- Multiple aegis-mcp instances work independently
-- Automatic cleanup on exit
+Safety features:
+- Backup file acts as "dirty flag" for crash recovery
+- Panic hooks and signal handlers ensure cleanup
+- If started without wrapper, `restart_claude` tool detects this and returns helpful error
 
 ## Building
 
@@ -376,9 +304,9 @@ make install
 sudo make install PREFIX=/usr/local
 
 # Manual build
-cargo build --workspace --release
+cargo build --release
 
-# Check versions
+# Check version
 aegis-mcp --version
 ```
 
@@ -386,39 +314,11 @@ aegis-mcp --version
 
 | Target | Description |
 |--------|-------------|
-| `make build` | Build debug binaries |
-| `make release` | Build release binaries |
+| `make build` | Build debug binary |
+| `make release` | Build release binary |
 | `make install` | Build and install to `~/.local` |
 | `make uninstall` | Remove installed files |
 | `make clean` | Remove build artifacts |
-
-The hooks library is installed to `~/.local/lib/` by default. It can also be placed:
-- Next to the `aegis-mcp` binary
-- In `./target/release/` (for development)
-- In `/usr/local/lib/` or `/usr/lib/`
-
-### Version Tracking
-
-Both the main binary and hooks library embed build timestamps and git hashes at compile time. This helps detect stale builds when the two components get out of sync.
-
-```bash
-$ aegis-mcp --version
-aegis-mcp v0.3.0
-  Built: 2026-01-30 09:16:49 UTC
-  Git:   6b83cd8
-
-Hooks library: /path/to/libaegis_hooks.so
-  Version: 0.1.0 (built 2026-01-30 09:16:45 UTC, git 6b83cd8)
-  Built:   2026-01-30 09:16:45 UTC
-```
-
-If the hooks library is stale, you'll see a warning:
-```
-WARNING: Hooks library version mismatch! Binary: 0.3.0 (abc1234), Library: 0.1.0 (old5678).
-Consider rebuilding with: cargo build -p aegis-hooks
-```
-
-**Tip:** Always use `cargo build --workspace` to build both components together and keep them in sync.
 
 ## Configuration
 
@@ -441,13 +341,12 @@ If you prefer to configure MCP manually instead of auto-injection:
 
 ```bash
 alias claude='aegis-mcp claude'
-alias claude-monitor='aegis-mcp claude --netmon'
 alias aegis-dashboard='aegis-mcp --dashboard'
 ```
 
 ## Platform Support
 
-Linux only (uses `/proc` filesystem, LD_PRELOAD, and network namespaces).
+Linux only (uses `/proc` filesystem).
 
 ## License
 

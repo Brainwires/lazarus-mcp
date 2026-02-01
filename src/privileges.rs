@@ -39,8 +39,7 @@ pub fn drop_privileges() -> Result<()> {
         .map(Uid::from_raw)
         .ok_or_else(|| {
             anyhow!(
-                "Running as root but SUDO_UID not set. \
-                 Either use 'sudo' to run as root, or use --keep-root to stay elevated."
+                "Running as root but SUDO_UID not set. Use 'sudo' to run as root."
             )
         })?;
 
@@ -50,8 +49,7 @@ pub fn drop_privileges() -> Result<()> {
         .map(Gid::from_raw)
         .ok_or_else(|| {
             anyhow!(
-                "Running as root but SUDO_GID not set. \
-                 Either use 'sudo' to run as root, or use --keep-root to stay elevated."
+                "Running as root but SUDO_GID not set. Use 'sudo' to run as root."
             )
         })?;
 

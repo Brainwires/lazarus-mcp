@@ -1,45 +1,29 @@
 mod mcp_server;
-mod netmon;
 mod pool;
 mod privileges;
 mod restart;
 mod tui;
-mod watchdog;
 mod wrapper;
 
 use anyhow::Result;
 use std::env;
+use std::path::PathBuf;
 use tracing::Level;
 use tracing_subscriber::EnvFilter;
 
 fn print_usage() {
-    eprintln!("aegis-mcp - Agent supervisor with hot-reload support for MCP servers\n");
+    eprintln!("aegis-mcp - Universal process supervisor\n");
     eprintln!("USAGE:");
-    eprintln!("  aegis-mcp <agent> [options] [agent-args...]   Run as wrapper for the specified agent");
-    eprintln!("  aegis-mcp --mcp-server                        Run as MCP server (used by agents)");
-    eprintln!("  aegis-mcp --dashboard [wrapper-pid]           Run TUI dashboard (monitor running wrapper)");
-    eprintln!("  aegis-mcp --version                           Show version information\n");
-    eprintln!("SUPPORTED AGENTS:");
-    eprintln!("  claude    Claude Code CLI");
-    eprintln!("  cursor    Cursor editor");
-    eprintln!("  aider     Aider CLI\n");
+    eprintln!("  aegis-mcp [options] <command> [args...]   Run command with supervision");
+    eprintln!("  aegis-mcp --mcp-server                    Run as MCP server (used internally)");
+    eprintln!("  aegis-mcp --dashboard [wrapper-pid]       Run TUI dashboard");
+    eprintln!("  aegis-mcp --version                       Show version information\n");
     eprintln!("OPTIONS:");
-    eprintln!("  --keep-root          Stay root instead of dropping privileges (when run with sudo)");
-    eprintln!("  --no-inject-mcp      Don't auto-inject aegis-mcp as an MCP server");
-    eprintln!("  --netmon             Enable network monitoring (auto-detect mode)");
-    eprintln!("  --netmon=preload     Force LD_PRELOAD mode for network monitoring");
-    eprintln!("  --netmon=netns       Force network namespace mode (requires root)");
-    eprintln!("  --watchdog-timeout   Watchdog timeout in seconds (default: 60)");
-    eprintln!("  --no-watchdog        Disable watchdog monitoring\n");
+    eprintln!("  --no-inject-mcp        Don't auto-inject aegis-mcp as an MCP server\n");
     eprintln!("EXAMPLES:");
+    eprintln!("  aegis-mcp claude");
     eprintln!("  aegis-mcp claude --continue");
-    eprintln!("  aegis-mcp claude -p \"Help me with...\"");
-    eprintln!("  aegis-mcp aider --model gpt-4");
-    eprintln!("  aegis-mcp claude --netmon          # Monitor network with LD_PRELOAD");
-    eprintln!("  aegis-mcp --dashboard              # Open TUI dashboard (auto-detect wrapper)");
-    eprintln!("  aegis-mcp --dashboard 12345        # Monitor specific wrapper PID");
-    eprintln!("  sudo aegis-mcp claude              # Drops to original user before spawning");
-    eprintln!("  sudo aegis-mcp claude --keep-root  # Stays root (advanced/debugging)");
+    eprintln!("  aegis-mcp --dashboard");
 }
 
 fn main() -> Result<()> {
@@ -51,14 +35,14 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Check for help
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        print_usage();
+        return Ok(());
+    }
+
     // Check if running as MCP server
-    let is_mcp_server = args.iter().any(|arg| arg == "--mcp-server");
-
-    // Check if running as dashboard
-    let is_dashboard = args.iter().any(|arg| arg == "--dashboard");
-
-    if is_mcp_server {
-        // MCP server mode - log to stderr (stdout is for MCP protocol)
+    if args.iter().any(|arg| arg == "--mcp-server") {
         tracing_subscriber::fmt()
             .with_env_filter(
                 EnvFilter::from_default_env()
@@ -68,9 +52,11 @@ fn main() -> Result<()> {
             .with_target(false)
             .init();
 
-        mcp_server::run()
-    } else if is_dashboard {
-        // Dashboard mode - find or use specified wrapper PID
+        return mcp_server::run();
+    }
+
+    // Check if running as dashboard
+    if args.iter().any(|arg| arg == "--dashboard") {
         let wrapper_pid = args
             .iter()
             .position(|a| a == "--dashboard")
@@ -81,115 +67,88 @@ fn main() -> Result<()> {
         match wrapper_pid {
             Some(pid) => {
                 eprintln!("Connecting to wrapper PID: {}", pid);
-                // Create a dummy watchdog for the dashboard
-                let watchdog = watchdog::create_watchdog();
-                tui::run_dashboard(watchdog, pid)
+                return tui::run_dashboard(pid);
             }
             None => {
                 eprintln!("Error: No running aegis-mcp wrapper found.");
-                eprintln!("Start a wrapper first with: aegis-mcp <agent>");
+                eprintln!("Start a wrapper first with: aegis-mcp <command>");
                 eprintln!("Or specify a PID: aegis-mcp --dashboard <pid>");
                 std::process::exit(1);
             }
         }
-    } else {
-        // Wrapper mode - log to stderr to not interfere with terminal
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                EnvFilter::from_default_env()
-                    .add_directive(Level::WARN.into())
-            )
-            .with_writer(std::io::stderr)
-            .with_target(false)
-            .init();
-
-        // First argument (after program name) is the agent name
-        if args.len() < 2 {
-            print_usage();
-            std::process::exit(1);
-        }
-
-        let agent = args[1].clone();
-
-        // Check for help
-        if agent == "--help" || agent == "-h" {
-            print_usage();
-            return Ok(());
-        }
-
-        // Parse aegis-mcp specific options and collect agent args
-        let remaining_args: Vec<String> = args.into_iter().skip(2).collect();
-        let keep_root = remaining_args.iter().any(|a| a == "--keep-root");
-        let inject_mcp = !remaining_args.iter().any(|a| a == "--no-inject-mcp");
-        let no_watchdog = remaining_args.iter().any(|a| a == "--no-watchdog");
-
-        // Parse --netmon option
-        let netmon_mode = remaining_args
-            .iter()
-            .find(|a| a.starts_with("--netmon"))
-            .map(|a| {
-                if a == "--netmon" {
-                    netmon::NetmonMode::Preload // Default to preload
-                } else if a == "--netmon=preload" {
-                    netmon::NetmonMode::Preload
-                } else if a == "--netmon=netns" {
-                    netmon::NetmonMode::Namespace
-                } else {
-                    eprintln!("Unknown netmon mode: {}. Using preload.", a);
-                    netmon::NetmonMode::Preload
-                }
-            });
-
-        // Parse --watchdog-timeout option
-        let watchdog_timeout = remaining_args
-            .iter()
-            .find(|a| a.starts_with("--watchdog-timeout="))
-            .and_then(|a| a.strip_prefix("--watchdog-timeout="))
-            .and_then(|t| t.parse::<u64>().ok())
-            .unwrap_or(60);
-
-        // Build watchdog config
-        let mut watchdog_config = watchdog::WatchdogConfig::default();
-        watchdog_config.enabled = !no_watchdog;
-        watchdog_config.heartbeat_timeout = std::time::Duration::from_secs(watchdog_timeout);
-
-        // Filter out aegis-mcp options, pass remaining to agent
-        let agent_args: Vec<String> = remaining_args
-            .into_iter()
-            .filter(|a| {
-                a != "--keep-root"
-                    && a != "--no-inject-mcp"
-                    && a != "--no-watchdog"
-                    && !a.starts_with("--netmon")
-                    && !a.starts_with("--watchdog-timeout")
-            })
-            .collect();
-
-        wrapper::run_with_watchdog(agent, agent_args, keep_root, netmon_mode, inject_mcp, watchdog_config)
     }
+
+    // Wrapper mode - parse options and command
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::from_default_env()
+                .add_directive(Level::WARN.into())
+        )
+        .with_writer(std::io::stderr)
+        .with_target(false)
+        .init();
+
+    // Parse arguments: options come before the command, command is first non-option arg
+    // Optional -- separator is supported for compatibility
+    let separator_pos = args.iter().position(|a| a == "--");
+
+    let (aegis_args, command_args) = if let Some(pos) = separator_pos {
+        // Explicit -- separator: everything before is options, everything after is command
+        let aegis: Vec<String> = args[1..pos].to_vec();
+        let cmd: Vec<String> = args[pos + 1..].to_vec();
+        (aegis, cmd)
+    } else {
+        // No separator: find first non-option argument as the command
+        let first_cmd_pos = args[1..].iter().position(|a| !a.starts_with("--"));
+
+        match first_cmd_pos {
+            Some(pos) => {
+                let actual_pos = pos + 1; // Adjust for skipping args[0]
+                let aegis: Vec<String> = args[1..actual_pos].to_vec();
+                let cmd: Vec<String> = args[actual_pos..].to_vec();
+                (aegis, cmd)
+            }
+            None => {
+                // No command found - show usage
+                print_usage();
+                eprintln!("\nError: No command specified. Use: aegis-mcp <command>");
+                std::process::exit(1);
+            }
+        }
+    };
+
+    // Must have a command
+    if command_args.is_empty() {
+        print_usage();
+        eprintln!("\nError: No command specified");
+        std::process::exit(1);
+    }
+
+    // Parse aegis-mcp options
+    let inject_mcp = !aegis_args.iter().any(|a| a == "--no-inject-mcp");
+
+    // The command is the first element, rest are its arguments
+    let command = PathBuf::from(&command_args[0]);
+    let cmd_args: Vec<String> = command_args[1..].to_vec();
+
+    wrapper::run_command(command, cmd_args, inject_mcp)
 }
 
 /// Find a running aegis-mcp wrapper by scanning /tmp for state files
 fn find_running_wrapper() -> Option<u32> {
-    let prefix = "/tmp/aegis-mcp-state-";
-
     if let Ok(entries) = std::fs::read_dir("/tmp") {
         for entry in entries.flatten() {
             let path = entry.path();
             if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
-                if filename.starts_with("aegis-mcp-state-") {
-                    if let Some(pid_str) = filename.strip_prefix("aegis-mcp-state-") {
-                        if let Ok(pid) = pid_str.parse::<u32>() {
-                            // Verify the process is still running
-                            if std::fs::metadata(format!("/proc/{}", pid)).is_ok() {
-                                return Some(pid);
-                            }
+                if let Some(pid_str) = filename.strip_prefix("aegis-mcp-state-") {
+                    if let Ok(pid) = pid_str.parse::<u32>() {
+                        if std::fs::metadata(format!("/proc/{}", pid)).is_ok() {
+                            return Some(pid);
                         }
                     }
                 }
             }
         }
     }
-
     None
 }

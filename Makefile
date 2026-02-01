@@ -9,14 +9,14 @@ LIBDIR ?= $(PREFIX)/lib
 all: build
 
 build:
-	cargo build --workspace
+	cargo build
 
 release:
-	cargo build --workspace --release
+	cargo build --release
 
 install: release
 	@echo "Installing aegis-mcp to $(BINDIR)"
-	@mkdir -p $(BINDIR) $(LIBDIR)
+	@mkdir -p $(BINDIR)
 	@# Remove conflicting cargo install if present
 	@if [ -f "$(HOME)/.cargo/bin/aegis-mcp" ] && [ "$(BINDIR)" != "$(HOME)/.cargo/bin" ]; then \
 		echo "Removing old cargo install at ~/.cargo/bin/aegis-mcp"; \
@@ -25,11 +25,9 @@ install: release
 	@# Remove before copy to handle "text file busy" (binary in use)
 	rm -f $(BINDIR)/aegis-mcp
 	cp target/release/aegis-mcp $(BINDIR)/
-	cp target/release/libaegis_hooks.so $(LIBDIR)/
 	@echo ""
 	@echo "Installed:"
 	@echo "  $(BINDIR)/aegis-mcp"
-	@echo "  $(LIBDIR)/libaegis_hooks.so"
 	@echo ""
 	@echo "NOTE: Run 'hash -r' or restart your shell to clear command cache"
 	@echo ""
@@ -38,7 +36,6 @@ install: release
 uninstall:
 	@echo "Removing aegis-mcp from $(BINDIR)"
 	rm -f $(BINDIR)/aegis-mcp
-	rm -f $(LIBDIR)/libaegis_hooks.so
 	@echo "Uninstalled."
 
 clean:

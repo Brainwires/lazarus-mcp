@@ -1,13 +1,12 @@
 //! TUI Dashboard for Aegis-MCP
 //!
-//! Provides a terminal-based dashboard for monitoring agents, network activity,
-//! file locks, and watchdog status.
+//! Provides a terminal-based dashboard for monitoring agents.
 
 mod app;
 mod events;
 mod ui;
 
-pub use app::{App, AppState};
+pub use app::App;
 
 use anyhow::Result;
 use crossterm::{
@@ -17,17 +16,10 @@ use crossterm::{
 };
 use ratatui::prelude::*;
 use std::io;
-use std::sync::Arc;
 use std::time::Duration;
 
-use crate::watchdog::SharedWatchdog;
-use crate::wrapper::SharedState;
-
 /// Run the TUI dashboard
-pub fn run_dashboard(
-    watchdog: SharedWatchdog,
-    wrapper_pid: u32,
-) -> Result<()> {
+pub fn run_dashboard(wrapper_pid: u32) -> Result<()> {
     // Setup terminal
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -36,7 +28,7 @@ pub fn run_dashboard(
     let mut terminal = Terminal::new(backend)?;
 
     // Create app state
-    let app = App::new(watchdog, wrapper_pid);
+    let app = App::new(wrapper_pid);
 
     // Run the main loop
     let res = run_app(&mut terminal, app);
@@ -75,10 +67,4 @@ where
         // Update state
         app.update();
     }
-}
-
-/// Check if the terminal supports TUI (has enough size)
-pub fn check_terminal_size() -> Result<bool> {
-    let (cols, rows) = crossterm::terminal::size()?;
-    Ok(cols >= 80 && rows >= 24)
 }
