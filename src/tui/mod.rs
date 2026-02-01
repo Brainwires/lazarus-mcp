@@ -1,4 +1,4 @@
-//! TUI Dashboard for Aegis-MCP
+//! TUI Dashboard for Lazarus-MCP
 //!
 //! Provides a terminal-based dashboard for monitoring agents.
 

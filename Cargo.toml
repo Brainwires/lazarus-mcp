@@ -1,8 +1,8 @@
 [package]
-name = "aegis-mcp"
+name = "lazarus-mcp"
 version = "0.3.0"
 edition = "2021"
-description = "Universal agent supervisor with hot-reload support for MCP servers"
+description = "Hot-reload wrapper for AI coding agents"
 license = "MIT"
 
 [dependencies]

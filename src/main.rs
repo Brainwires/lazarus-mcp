@@ -12,18 +12,18 @@ use tracing::Level;
 use tracing_subscriber::EnvFilter;
 
 fn print_usage() {
-    eprintln!("aegis-mcp - Universal process supervisor\n");
+    eprintln!("lazarus-mcp - Universal process supervisor\n");
     eprintln!("USAGE:");
-    eprintln!("  aegis-mcp [options] <command> [args...]   Run command with supervision");
-    eprintln!("  aegis-mcp --mcp-server                    Run as MCP server (used internally)");
-    eprintln!("  aegis-mcp --dashboard [wrapper-pid]       Run TUI dashboard");
-    eprintln!("  aegis-mcp --version                       Show version information\n");
+    eprintln!("  lazarus-mcp [options] <command> [args...]   Run command with supervision");
+    eprintln!("  lazarus-mcp --mcp-server                    Run as MCP server (used internally)");
+    eprintln!("  lazarus-mcp --dashboard [wrapper-pid]       Run TUI dashboard");
+    eprintln!("  lazarus-mcp --version                       Show version information\n");
     eprintln!("OPTIONS:");
-    eprintln!("  --no-inject-mcp        Don't auto-inject aegis-mcp as an MCP server\n");
+    eprintln!("  --no-inject-mcp        Don't auto-inject lazarus-mcp as an MCP server\n");
     eprintln!("EXAMPLES:");
-    eprintln!("  aegis-mcp claude");
-    eprintln!("  aegis-mcp claude --continue");
-    eprintln!("  aegis-mcp --dashboard");
+    eprintln!("  lazarus-mcp claude");
+    eprintln!("  lazarus-mcp claude --continue");
+    eprintln!("  lazarus-mcp --dashboard");
 }
 
 fn main() -> Result<()> {
@@ -70,9 +70,9 @@ fn main() -> Result<()> {
                 return tui::run_dashboard(pid);
             }
             None => {
-                eprintln!("Error: No running aegis-mcp wrapper found.");
-                eprintln!("Start a wrapper first with: aegis-mcp <command>");
-                eprintln!("Or specify a PID: aegis-mcp --dashboard <pid>");
+                eprintln!("Error: No running lazarus-mcp wrapper found.");
+                eprintln!("Start a wrapper first with: lazarus-mcp <command>");
+                eprintln!("Or specify a PID: lazarus-mcp --dashboard <pid>");
                 std::process::exit(1);
             }
         }
@@ -111,7 +111,7 @@ fn main() -> Result<()> {
             None => {
                 // No command found - show usage
                 print_usage();
-                eprintln!("\nError: No command specified. Use: aegis-mcp <command>");
+                eprintln!("\nError: No command specified. Use: lazarus-mcp <command>");
                 std::process::exit(1);
             }
         }
@@ -124,7 +124,7 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    // Parse aegis-mcp options
+    // Parse lazarus-mcp options
     let inject_mcp = !aegis_args.iter().any(|a| a == "--no-inject-mcp");
 
     // The command is the first element, rest are its arguments
@@ -134,13 +134,13 @@ fn main() -> Result<()> {
     wrapper::run_command(command, cmd_args, inject_mcp)
 }
 
-/// Find a running aegis-mcp wrapper by scanning /tmp for state files
+/// Find a running lazarus-mcp wrapper by scanning /tmp for state files
 fn find_running_wrapper() -> Option<u32> {
     if let Ok(entries) = std::fs::read_dir("/tmp") {
         for entry in entries.flatten() {
             let path = entry.path();
             if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
-                if let Some(pid_str) = filename.strip_prefix("aegis-mcp-state-") {
+                if let Some(pid_str) = filename.strip_prefix("lazarus-mcp-state-") {
                     if let Ok(pid) = pid_str.parse::<u32>() {
                         if std::fs::metadata(format!("/proc/{}", pid)).is_ok() {
                             return Some(pid);

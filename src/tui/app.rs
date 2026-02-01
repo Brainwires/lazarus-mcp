@@ -190,7 +190,7 @@ impl App {
             KeyCode::BackTab => self.selected_panel = self.selected_panel.prev(),
             KeyCode::Char('r') => {
                 // Trigger restart via signal file
-                let signal_path = format!("/tmp/aegis-mcp-{}", self.wrapper_pid);
+                let signal_path = format!("/tmp/lazarus-mcp-{}", self.wrapper_pid);
                 let signal = serde_json::json!({
                     "reason": "TUI restart request"
                 });

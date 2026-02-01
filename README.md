@@ -1,4 +1,4 @@
-# aegis-mcp
+# lazarus-mcp
 
 A universal agent supervisor with hot-reload support, multi-agent orchestration, and TUI dashboard for AI coding agents.
 
@@ -16,12 +16,12 @@ A universal agent supervisor with hot-reload support, multi-agent orchestration,
 
 ```bash
 # Clone and install
-git clone https://github.com/Brainwires/aegis-mcp.git
-cd aegis-mcp
+git clone https://github.com/Brainwires/lazarus-mcp.git
+cd lazarus-mcp
 cargo install --path .
 
 # Run Claude Code through the wrapper
-aegis-mcp claude
+lazarus-mcp claude
 ```
 
 That's it! The wrapper automatically:
@@ -33,15 +33,15 @@ That's it! The wrapper automatically:
 
 ```
 Terminal
-  └── aegis-mcp claude (wrapper)
+  └── lazarus-mcp claude (wrapper)
         │
         ├── Modifies .mcp.json (backup at .mcp.json.aegis-backup)
-        ├── Shared State (/tmp/aegis-mcp-state-{pid}.json)
+        ├── Shared State (/tmp/lazarus-mcp-state-{pid}.json)
         │
         └── claude --dangerously-skip-permissions
               │
               └── MCP servers (from .mcp.json)
-                    └── aegis-mcp --mcp-server
+                    └── lazarus-mcp --mcp-server
                           ├── restart_claude
                           └── agent_spawn/list/status/await/stop
 
@@ -49,7 +49,7 @@ On Exit (normal, signal, or crash):
   └── Restores .mcp.json from backup
 
 Second Terminal (optional)
-  └── aegis-mcp --dashboard
+  └── lazarus-mcp --dashboard
         └── TUI showing real-time status
 ```
 
@@ -67,16 +67,16 @@ Second Terminal (optional)
 
 ```bash
 # Claude Code
-aegis-mcp claude
-aegis-mcp claude --continue
-aegis-mcp claude -p "Help me with..."
+lazarus-mcp claude
+lazarus-mcp claude --continue
+lazarus-mcp claude -p "Help me with..."
 
 # Aider
-aegis-mcp aider
-aegis-mcp aider --model gpt-4
+lazarus-mcp aider
+lazarus-mcp aider --model gpt-4
 
 # Cursor
-aegis-mcp cursor
+lazarus-mcp cursor
 ```
 
 ### TUI Dashboard
@@ -85,13 +85,13 @@ Monitor a running wrapper with the TUI dashboard:
 
 ```bash
 # In terminal 1: Run the agent
-aegis-mcp claude
+lazarus-mcp claude
 
 # In terminal 2: Open dashboard (auto-detects running wrapper)
-aegis-mcp --dashboard
+lazarus-mcp --dashboard
 
 # Or specify a wrapper PID
-aegis-mcp --dashboard 12345
+lazarus-mcp --dashboard 12345
 ```
 
 Dashboard panels:
@@ -113,7 +113,7 @@ Keybindings:
 |--------|-------------|
 | `--version`, `-V` | Show version info |
 | `--dashboard [pid]` | Run TUI dashboard (monitor running wrapper) |
-| `--no-inject-mcp` | Don't auto-inject aegis-mcp as an MCP server |
+| `--no-inject-mcp` | Don't auto-inject lazarus-mcp as an MCP server |
 
 ## MCP Tools
 
@@ -198,26 +198,26 @@ List all currently held file locks by agents (for coordination).
 
 ### Hot-Reload
 
-1. User starts agent via `aegis-mcp claude`
+1. User starts agent via `lazarus-mcp claude`
 2. Wrapper backs up `.mcp.json` to `.mcp.json.aegis-backup`
-3. Wrapper injects aegis-mcp into `.mcp.json`
-4. Agent spawns and loads aegis-mcp as an MCP server
+3. Wrapper injects lazarus-mcp into `.mcp.json`
+4. Agent spawns and loads lazarus-mcp as an MCP server
 5. When `restart_claude` is called:
-   - MCP server writes signal file to `/tmp/aegis-mcp-{pid}`
+   - MCP server writes signal file to `/tmp/lazarus-mcp-{pid}`
    - Wrapper detects signal, sends SIGINT → SIGTERM → SIGKILL
    - Agent restarts with `--continue` flag
    - Session context is preserved
 6. On exit (normal, signal, or crash), `.mcp.json` is restored from backup
 
-**Note:** The `restart_claude` tool detects if running under the wrapper. If started without the wrapper, it returns an error message explaining how to use aegis-mcp.
+**Note:** The `restart_claude` tool detects if running under the wrapper. If started without the wrapper, it returns an error message explaining how to use lazarus-mcp.
 
 ### MCP Server Injection
 
-aegis-mcp injects itself into `.mcp.json` with automatic backup/restore:
+lazarus-mcp injects itself into `.mcp.json` with automatic backup/restore:
 
 1. On startup, checks for `.mcp.json.aegis-backup` (previous crash recovery)
 2. Backs up existing `.mcp.json` to `.mcp.json.aegis-backup`
-3. Adds aegis-mcp server entry to `.mcp.json`
+3. Adds lazarus-mcp server entry to `.mcp.json`
 4. Agent spawns and sees the injected MCP server
 5. On exit (normal, Ctrl+C, or crash), restores original `.mcp.json`
 
@@ -233,7 +233,7 @@ Safety features:
 cargo install --path .
 
 # Check version
-aegis-mcp --version
+lazarus-mcp --version
 ```
 
 ## Configuration
@@ -245,8 +245,8 @@ If you prefer to configure MCP manually instead of auto-injection:
 ```json
 {
   "mcpServers": {
-    "aegis-mcp": {
-      "command": "aegis-mcp",
+    "lazarus-mcp": {
+      "command": "lazarus-mcp",
       "args": ["--mcp-server"]
     }
   }
@@ -256,8 +256,8 @@ If you prefer to configure MCP manually instead of auto-injection:
 ### Shell Alias
 
 ```bash
-alias claude='aegis-mcp claude'
-alias aegis-dashboard='aegis-mcp --dashboard'
+alias claude='lazarus-mcp claude'
+alias aegis-dashboard='lazarus-mcp --dashboard'
 ```
 
 ## Platform Support

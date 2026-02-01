@@ -45,7 +45,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let title = Line::from(vec![
-        Span::styled(" AEGIS-MCP ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(" LAZARUS-MCP ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
         Span::raw("| Status: "),
         Span::styled(status.0, Style::default().fg(status.1)),
         Span::raw(" | "),

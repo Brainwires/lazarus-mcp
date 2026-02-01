@@ -56,7 +56,7 @@ fn emergency_cleanup() {
 fn install_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
-        eprintln!("[aegis-mcp] Panic detected, cleaning up...");
+        eprintln!("[lazarus-mcp] Panic detected, cleaning up...");
         emergency_cleanup();
         default_hook(panic_info);
     }));
@@ -70,18 +70,18 @@ fn install_panic_hook() {
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Build timestamp
-pub const BUILD_TIME: &str = env!("AEGIS_BUILD_TIME");
+pub const BUILD_TIME: &str = env!("LAZARUS_BUILD_TIME");
 
 /// Git commit hash
-pub const GIT_HASH: &str = env!("AEGIS_GIT_HASH");
+pub const GIT_HASH: &str = env!("LAZARUS_GIT_HASH");
 
-const SIGNAL_FILE_PREFIX: &str = "/tmp/aegis-mcp-";
+const SIGNAL_FILE_PREFIX: &str = "/tmp/lazarus-mcp-";
 
 /// Target file for MCP config
 const MCP_TARGET_FILE: &str = ".mcp.json";
 
 /// Shared state file for TUI/MCP communication
-const SHARED_STATE_FILE: &str = "/tmp/aegis-mcp-state-";
+const SHARED_STATE_FILE: &str = "/tmp/lazarus-mcp-state-";
 
 /// Shared state accessible by TUI and MCP server
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -164,7 +164,7 @@ struct ParsedRestartSignal {
 
 /// Backup path for .mcp.json
 fn mcp_backup_path() -> PathBuf {
-    PathBuf::from(".mcp.json.aegis-backup")
+    PathBuf::from(".mcp.json.lazarus-backup")
 }
 
 /// Restore .mcp.json from backup if a previous run crashed
@@ -192,7 +192,7 @@ fn restore_mcp_if_dirty() {
     }
 }
 
-/// Inject aegis-mcp into .mcp.json (with backup for restore on exit)
+/// Inject lazarus-mcp into .mcp.json (with backup for restore on exit)
 fn inject_mcp_server() -> Result<(PathBuf, PathBuf)> {
     let aegis_path = std::env::current_exe()
         .context("Failed to get current executable path")?;
@@ -222,8 +222,8 @@ fn inject_mcp_server() -> Result<(PathBuf, PathBuf)> {
         config["mcpServers"] = json!({});
     }
 
-    // Inject aegis-mcp server
-    config["mcpServers"]["aegis-mcp"] = json!({
+    // Inject lazarus-mcp server
+    config["mcpServers"]["lazarus-mcp"] = json!({
         "command": aegis_path.to_string_lossy(),
         "args": ["--mcp-server"]
     });
@@ -232,11 +232,11 @@ fn inject_mcp_server() -> Result<(PathBuf, PathBuf)> {
     let content = serde_json::to_string_pretty(&config)?;
     fs::write(&mcp_path, &content)?;
 
-    info!("Injected aegis-mcp into .mcp.json (backup at {})", backup_path.display());
+    info!("Injected lazarus-mcp into .mcp.json (backup at {})", backup_path.display());
     Ok((backup_path, mcp_path))
 }
 
-/// Remove aegis-mcp from .mcp.json (restore from backup)
+/// Remove lazarus-mcp from .mcp.json (restore from backup)
 fn restore_mcp_config(backup_path: &Path, target_path: &Path) {
     if backup_path.exists() {
         // Check if backup is empty (meaning original didn't exist)
@@ -258,7 +258,7 @@ fn restore_mcp_config(backup_path: &Path, target_path: &Path) {
 
 /// Display version information
 pub fn print_version_info() {
-    println!("aegis-mcp v{}", VERSION);
+    println!("lazarus-mcp v{}", VERSION);
     println!("  Built: {}", BUILD_TIME);
     println!("  Git:   {}", GIT_HASH);
 }
@@ -320,7 +320,7 @@ pub fn run_command(
     // Restore .mcp.json if a previous run crashed
     restore_mcp_if_dirty();
 
-    // Inject aegis-mcp into .mcp.json
+    // Inject lazarus-mcp into .mcp.json
     let mcp_paths = if inject_mcp {
         match inject_mcp_server() {
             Ok(paths) => Some(paths),

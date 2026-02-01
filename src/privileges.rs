@@ -1,7 +1,7 @@
 //! Privilege Management
 //!
 //! Handles dropping root privileges when running with elevated permissions.
-//! By default, aegis-mcp drops to the original user before spawning coding agents
+//! By default, lazarus-mcp drops to the original user before spawning coding agents
 //! to prevent accidental damage from privileged operations.
 
 use anyhow::{anyhow, Context, Result};

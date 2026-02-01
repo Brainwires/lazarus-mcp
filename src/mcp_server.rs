@@ -1,6 +1,6 @@
 //! MCP Server Implementation
 //!
-//! Implements the MCP (Model Context Protocol) server that exposes aegis-mcp's capabilities.
+//! Implements the MCP (Model Context Protocol) server that exposes lazarus-mcp's capabilities.
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -27,7 +27,7 @@ fn get_pool() -> Arc<RwLock<AgentPool>> {
 
 /// MCP Server implementation
 pub fn run() -> Result<()> {
-    info!("Starting aegis-mcp MCP server");
+    info!("Starting lazarus-mcp MCP server");
 
     // Create tokio runtime for async operations
     let rt = Runtime::new()?;
@@ -114,7 +114,7 @@ fn handle_initialize() -> Value {
             "tools": {}
         },
         "serverInfo": {
-            "name": "aegis-mcp",
+            "name": "lazarus-mcp",
             "version": env!("CARGO_PKG_VERSION")
         }
     })
@@ -126,7 +126,7 @@ fn handle_tools_list() -> Value {
             // Existing restart tools
             {
                 "name": "restart_claude",
-                "description": "Restart the AI coding agent to reconnect all MCP servers. Use this after making changes to an MCP server's code. Requires the agent to be started via the aegis-mcp wrapper (e.g., 'aegis-mcp claude'). The session will automatically continue if the agent supports it. Optionally include a prompt to auto-send after restart.",
+                "description": "Restart the AI coding agent to reconnect all MCP servers. Use this after making changes to an MCP server's code. Requires the agent to be started via the lazarus-mcp wrapper (e.g., 'lazarus-mcp claude'). The session will automatically continue if the agent supports it. Optionally include a prompt to auto-send after restart.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -331,7 +331,7 @@ fn handle_restart_claude(arguments: Option<&Value>) -> Value {
         Err(e) => json!({
             "content": [{
                 "type": "text",
-                "text": format!("Failed to trigger restart: {}\n\nMake sure you started your agent via the aegis-mcp wrapper:\n  aegis-mcp <agent> [args...]\n\nExample: aegis-mcp claude --continue", e)
+                "text": format!("Failed to trigger restart: {}\n\nMake sure you started your agent via the lazarus-mcp wrapper:\n  lazarus-mcp <agent> [args...]\n\nExample: lazarus-mcp claude --continue", e)
             }],
             "isError": true
         }),

@@ -4,7 +4,7 @@ use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::info;
 
-const SIGNAL_FILE_PREFIX: &str = "/tmp/aegis-mcp-";
+const SIGNAL_FILE_PREFIX: &str = "/tmp/lazarus-mcp-";
 
 #[derive(Debug, Serialize)]
 pub struct RestartSignalInfo {
@@ -57,9 +57,9 @@ fn get_comm(pid: u32) -> Option<String> {
 /// Find the wrapper PID by walking up the process tree
 fn find_wrapper_pid() -> Option<u32> {
     // The process tree should be:
-    // wrapper (aegis-mcp) -> claude -> MCP server (aegis-mcp --mcp-server)
+    // wrapper (lazarus-mcp) -> claude -> MCP server (lazarus-mcp --mcp-server)
     //
-    // So we need to find a grandparent or great-grandparent that is aegis-mcp
+    // So we need to find a grandparent or great-grandparent that is lazarus-mcp
 
     let mut current_pid = get_parent_pid()?; // Start with parent (should be claude)
 
@@ -68,7 +68,7 @@ fn find_wrapper_pid() -> Option<u32> {
         let comm = get_comm(current_pid)?;
 
         // Check if this is the wrapper
-        if comm.contains("aegis-mcp") {
+        if comm.contains("lazarus-mcp") {
             return Some(current_pid);
         }
 
@@ -91,7 +91,7 @@ fn find_wrapper_pid() -> Option<u32> {
 /// Send a restart signal to the wrapper
 pub fn send_restart_signal(reason: &str, prompt: Option<&str>) -> Result<RestartSignalInfo> {
     let wrapper_pid = find_wrapper_pid()
-        .context("Could not find wrapper process. Make sure your agent was started via: aegis-mcp <agent> [args...]")?;
+        .context("Could not find wrapper process. Make sure your agent was started via: lazarus-mcp <agent> [args...]")?;
 
     let signal_file = format!("{}{}", SIGNAL_FILE_PREFIX, wrapper_pid);
 
