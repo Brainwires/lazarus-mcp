@@ -44,20 +44,9 @@ tui-input = "0.15"
 nix = { version = "0.29", features = ["process", "signal", "user"] }
 libc = "0.2"
 
-# eBPF SSL interception (Linux only)
-[target.'cfg(target_os = "linux")'.dependencies]
-aegis-ebpf = { path = "ebpf", optional = true }
-
-[features]
-default = []
-ebpf = ["aegis-ebpf"]
-
 [profile.release]
 lto = true
 strip = true
-
-[workspace]
-members = ["ebpf"]
 
 [build-dependencies]
 chrono = "0.4"
