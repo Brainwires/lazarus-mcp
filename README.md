@@ -18,8 +18,7 @@ A universal agent supervisor with hot-reload support, multi-agent orchestration,
 # Clone and install
 git clone https://github.com/Brainwires/aegis-mcp.git
 cd aegis-mcp
-cargo build --release
-cp target/release/aegis-mcp ~/.local/bin/
+cargo install --path .
 
 # Run Claude Code through the wrapper
 aegis-mcp claude
@@ -230,14 +229,8 @@ Safety features:
 ## Building
 
 ```bash
-# Build release binary
-cargo build --release
-
-# Install to ~/.local/bin
-cp target/release/aegis-mcp ~/.local/bin/
-
-# Or install system-wide
-sudo cp target/release/aegis-mcp /usr/local/bin/
+# Build and install to ~/.cargo/bin
+cargo install --path .
 
 # Check version
 aegis-mcp --version
