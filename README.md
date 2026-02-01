@@ -1,12 +1,11 @@
 # aegis-mcp
 
-A universal agent supervisor with hot-reload support, multi-agent orchestration, watchdog monitoring, and TUI dashboard for AI coding agents.
+A universal agent supervisor with hot-reload support, multi-agent orchestration, and TUI dashboard for AI coding agents.
 
 ## Features
 
 - **Hot-Reload** - Restart your AI agent to pick up MCP server changes without losing terminal context
-- **Watchdog Monitoring** - Detect and recover from hung/unresponsive agents automatically
-- **TUI Dashboard** - Real-time terminal dashboard showing agent health and pool status
+- **TUI Dashboard** - Real-time terminal dashboard showing agent status and pool
 - **Multi-Agent Pool** - Spawn background agents to work on tasks autonomously
 - **Safe MCP Injection** - Auto-injects into `.mcp.json` with backup/restore on exit
 - **Privilege Safety** - Automatically drops root privileges before spawning agents
@@ -29,7 +28,6 @@ That's it! The wrapper automatically:
 - Injects itself as an MCP server into `.mcp.json` (restored on exit)
 - Adds permission-skipping flags appropriate for the agent
 - Uses `--continue` on restarts to preserve session context
-- Monitors agent health and auto-restarts on lockup
 
 ## Architecture
 
@@ -38,7 +36,6 @@ Terminal
   └── aegis-mcp claude (wrapper)
         │
         ├── Modifies .mcp.json (backup at .mcp.json.aegis-backup)
-        ├── Watchdog (monitors health, detects lockups)
         ├── Shared State (/tmp/aegis-mcp-state-{pid}.json)
         │
         └── claude --dangerously-skip-permissions
@@ -46,7 +43,6 @@ Terminal
               └── MCP servers (from .mcp.json)
                     └── aegis-mcp --mcp-server
                           ├── restart_claude
-                          ├── watchdog_status/configure/disable/ping
                           └── agent_spawn/list/status/await/stop
 
 On Exit (normal, signal, or crash):
@@ -99,8 +95,7 @@ aegis-mcp --dashboard 12345
 ```
 
 Dashboard panels:
-- **Primary Agent** - Status, PID, uptime, restarts, health state
-- **System** - Memory and CPU usage bars
+- **Primary Agent** - Status, PID, uptime, restarts
 - **Agent Pool** - Background agents and their tasks
 - **File Locks** - Currently held locks
 - **Log** - Event log with timestamps
@@ -112,24 +107,12 @@ Keybindings:
 - `r` - Restart agent
 - `j` / `k` or arrows - Scroll log
 
-### Watchdog Configuration
-
-```bash
-# Custom timeout (default: 60 seconds)
-aegis-mcp --watchdog-timeout=120 claude
-
-# Disable watchdog
-aegis-mcp --no-watchdog claude
-```
-
 ### Options
 
 | Option | Description |
 |--------|-------------|
 | `--version`, `-V` | Show version info |
 | `--dashboard [pid]` | Run TUI dashboard (monitor running wrapper) |
-| `--watchdog-timeout=<secs>` | Heartbeat timeout in seconds (default: 60) |
-| `--no-watchdog` | Disable watchdog monitoring |
 | `--no-inject-mcp` | Don't auto-inject aegis-mcp as an MCP server |
 
 ## MCP Tools
@@ -152,43 +135,6 @@ restart_claude(reason: "MCP server updated", prompt: "Continue where we left off
 #### server_status
 
 Get status information about the wrapper, agent process, and configuration.
-
-### Watchdog Tools
-
-Monitor and control the watchdog system that detects hung processes.
-
-#### watchdog_status
-
-Get current health status including:
-- Process state (Active, Idle, Unresponsive, HighResource)
-- Uptime and last activity time
-- Memory and CPU usage
-- Pending actions
-
-#### watchdog_configure
-
-Configure watchdog settings at runtime.
-
-```
-Parameters:
-- enabled (optional): Enable or disable watchdog
-- heartbeat_timeout_secs (optional): Seconds without activity before unresponsive
-- lockup_action (optional): "warn", "restart", "restart_with_backoff", "kill", "notify_and_wait"
-- max_memory_mb (optional): Maximum memory usage before triggering action
-```
-
-#### watchdog_disable
-
-Temporarily disable watchdog for long-running operations.
-
-```
-Parameters:
-- duration_secs (optional): Seconds to disable (default: 300)
-```
-
-#### watchdog_ping
-
-Send a manual heartbeat to reset the activity timer.
 
 ### Agent Pool Tools
 
@@ -249,20 +195,6 @@ Get statistics about the agent pool (max agents, active, running, completed, fai
 List all currently held file locks by agents (for coordination).
 
 ## How It Works
-
-### Watchdog Monitoring
-
-The watchdog tracks agent activity through multiple signals:
-- stdout/stderr output
-- MCP tool calls
-- Manual pings from the agent
-
-When no activity is detected for the configured timeout (default 60s):
-1. Process is marked as Unresponsive
-2. After 3 consecutive checks, configured action is taken
-3. Default action is to restart the agent automatically
-
-The watchdog can be controlled via MCP tools or temporarily disabled for long operations.
 
 ### Hot-Reload
 
